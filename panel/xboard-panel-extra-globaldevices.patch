@@ -1,0 +1,167 @@
+diff --git a/app/Http/Controllers/V1/Admin/UserController.php b/app/Http/Controllers/V1/Admin/UserController.php
+index 8117aa1..c436383 100644
+--- a/app/Http/Controllers/V1/Admin/UserController.php
++++ b/app/Http/Controllers/V1/Admin/UserController.php
+@@ -11,6 +11,7 @@ use App\Http\Requests\Admin\UserUpdate;
+ use App\Jobs\SendEmailJob;
+ use App\Models\Plan;
+ use App\Models\User;
++use App\Services\DeviceStateService;
+ use App\Services\AuthService;
+ use App\Utils\Helper;
+ use Illuminate\Http\Request;
+@@ -66,6 +67,7 @@ class UserController extends Controller
+         $total = $userModel->count();
+         $res = $userModel->forPage($current, $pageSize)
+             ->get();
++        (new DeviceStateService())->applyOnlineCounts($res);
+         $plan = Plan::get();
+         for ($i = 0; $i < count($res); $i++) {
+             for ($k = 0; $k < count($plan); $k++) {
+diff --git a/app/Http/Controllers/V1/Server/UniProxyController.php b/app/Http/Controllers/V1/Server/UniProxyController.php
+index 35d94a5..b9e5e2e 100644
+--- a/app/Http/Controllers/V1/Server/UniProxyController.php
++++ b/app/Http/Controllers/V1/Server/UniProxyController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers\V1\Server;
+ 
+ use App\Http\Controllers\Controller;
++use App\Services\DeviceStateService;
+ use App\Services\ServerService;
+ use App\Services\UserService;
+ use App\Utils\CacheKey;
+@@ -31,6 +32,21 @@ class UniProxyController extends Controller
+         return response($response)->header('ETag', "\"{$eTag}\"");
+     }
+ 
++    // Return the panel-aggregated device snapshot for this node's users.
++    // xboard-node uses this as the REST fallback for WebSocket sync.devices.
++    public function devices(Request $request)
++    {
++        $users = ServerService::getAvailableUsers($request->input('node_info')->group_id);
++        $userIds = $users->pluck('id')->map(fn ($id) => (int) $id)->all();
++        $limits = $users->mapWithKeys(fn ($user) => [
++            (int) $user->id => (int) ($user->device_limit ?? 0),
++        ])->all();
++
++        return response([
++            'users' => (new DeviceStateService())->getUsersDevices($userIds, $limits),
++        ]);
++    }
++
+     // 后端提交数据
+     public function push(Request $request)
+     {
+@@ -80,6 +96,31 @@ class UniProxyController extends Controller
+         return $this->success(true);
+     }
+ 
++    public function report(Request $request)
++    {
++        $payload = json_decode(get_request_content(), true) ?: [];
++
++        if (!empty($payload['alive']) && is_array($payload['alive'])) {
++            $this->saveAliveDevices($request, $payload['alive']);
++        }
++
++        if (!empty($payload['traffic']) && is_array($payload['traffic'])) {
++            $data = [];
++            foreach ($payload['traffic'] as $userId => $traffic) {
++                if (is_array($traffic) && count($traffic) === 2 && is_numeric($traffic[0]) && is_numeric($traffic[1])) {
++                    $data[(int) $userId] = [(int) $traffic[0], (int) $traffic[1]];
++                }
++            }
++            if ($data) {
++                $userService = new UserService();
++                $userService->trafficFetch($request->input('node_info')->toArray(), $request->input('node_type'), $data, $request->ip());
++            }
++        }
++
++        Cache::put(CacheKey::get('SERVER_' . strtoupper($request->input('node_type')) . '_LAST_PUSH_AT', $request->input('node_id')), time(), 3600);
++        return $this->success(true);
++    }
++
+     // 后端获取配置
+     public function config(Request $request)
+     {
+@@ -159,6 +200,27 @@ class UniProxyController extends Controller
+     // 后端提交在线数据
+     public function alive(Request $request)
+     {
++        $payload = json_decode(get_request_content(), true) ?: [];
++        $this->saveAliveDevices($request, $payload);
+         return $this->success(true);
+     }
++
++    private function saveAliveDevices(Request $request, array $alive): void
++    {
++        $nodeId = (int) $request->input('node_id');
++        if ($nodeId <= 0) {
++            return;
++        }
++
++        $deviceState = new DeviceStateService();
++        foreach ($alive as $userId => $ips) {
++            if (!is_array($ips)) {
++                continue;
++            }
++            $deviceState->setDevices((int) $userId, $nodeId, $ips);
++        }
++
++        Cache::put(CacheKey::get('SERVER_' . strtoupper($request->input('node_type')) . '_ONLINE_USER', $nodeId), count($alive), 3600);
++        Cache::put(CacheKey::get('SERVER_' . strtoupper($request->input('node_type')) . '_LAST_PUSH_AT', $nodeId), time(), 3600);
++    }
+ }
+diff --git a/app/Http/Routes/V1/ServerRoute.php b/app/Http/Routes/V1/ServerRoute.php
+index 77070b3..60905c4 100644
+--- a/app/Http/Routes/V1/ServerRoute.php
++++ b/app/Http/Routes/V1/ServerRoute.php
+@@ -20,6 +20,7 @@ class ServerRoute
+             ] ,function ($route) {
+                 $route->get('config', [UniProxyController::class, 'config']);
+                 $route->get('user', [UniProxyController::class, 'user']);
++                $route->get('devices', [UniProxyController::class, 'devices']);
+                 $route->post('push', [UniProxyController::class, 'push']);
+                 $route->post('alive', [UniProxyController::class, 'alive']);
+             });
+diff --git a/app/Services/ServerService.php b/app/Services/ServerService.php
+index 60bcefa..1adb09c 100644
+--- a/app/Services/ServerService.php
++++ b/app/Services/ServerService.php
+@@ -14,6 +14,7 @@ use App\Utils\CacheKey;
+ use App\Utils\Helper;
+ use Illuminate\Support\Collection;
+ use Illuminate\Support\Facades\Cache;
++use Illuminate\Support\Facades\Schema;
+ 
+ class ServerService
+ {
+@@ -196,6 +197,15 @@ class ServerService
+     // 获取可用的用户列表
+     public static function getAvailableUsers($groupId): Collection
+     {
++        $select = [
++            'id',
++            'uuid',
++            'speed_limit'
++        ];
++        if (Schema::hasColumn('v2_user', 'device_limit')) {
++            $select[] = 'device_limit';
++        }
++
+         return User::toBase()
+             ->whereIn('group_id', $groupId)
+             ->whereRaw('u + d < transfer_enable')
+@@ -204,11 +214,7 @@ class ServerService
+                     ->orWhere('expired_at', NULL);
+             })
+             ->where('banned', 0)
+-            ->select([
+-                'id',
+-                'uuid',
+-                'speed_limit'
+-            ])
++            ->select($select)
+             ->get();
+     }
+ 

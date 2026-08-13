@@ -1,0 +1,440 @@
+diff --git a/internal/controlplane/machine.go b/internal/controlplane/machine.go
+index 8911c60..b97689a 100644
+--- a/internal/controlplane/machine.go
++++ b/internal/controlplane/machine.go
+@@ -76,11 +76,16 @@ func (p *MachinePanelControlPlane) Initial(
+ 	if err != nil {
+ 		return Bootstrap{}, fmt.Errorf("machine initial users: %w", err)
+ 	}
++	devices, err := p.client.GetDevices()
++	if err != nil {
++		nlog.Core().Warn("machine initial device fetch failed; using local device state", "error", err)
++	}
+ 	bootstrap.Config, err = model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
+ 	if err != nil {
+ 		return Bootstrap{}, fmt.Errorf("machine initial config normalize: %w", err)
+ 	}
+ 	bootstrap.Users = model.UserSpecsFromPanel(users)
++	bootstrap.DeviceUsers = devices
+ 
+ 	// Register mailbox access after the initial snapshot is prepared, so the
+ 	// Service can start the kernel immediately and only then drain coalesced WS
+@@ -104,6 +109,10 @@ func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
+ 	if err != nil {
+ 		return Snapshot{}, fmt.Errorf("machine poll users: %w", err)
+ 	}
++	devices, err := p.client.GetDevices()
++	if err != nil {
++		nlog.Core().Warn("machine global device fetch failed; keeping previous state", "error", err)
++	}
+ 	select {
+ 	case <-ctx.Done():
+ 		return Snapshot{}, ctx.Err()
+@@ -113,7 +122,7 @@ func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
+ 	if err != nil {
+ 		return Snapshot{}, fmt.Errorf("machine poll normalize: %w", err)
+ 	}
+-	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users)}, nil
++	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users), DeviceUsers: devices}, nil
+ }
+ 
+ func (p *MachinePanelControlPlane) Discover(
+diff --git a/internal/controlplane/panel.go b/internal/controlplane/panel.go
+index ab93366..eddee6c 100644
+--- a/internal/controlplane/panel.go
++++ b/internal/controlplane/panel.go
+@@ -60,11 +60,18 @@ func (p *PanelControlPlane) Initial(ctx context.Context, metricsFn func() map[st
+ 	if err != nil {
+ 		return Bootstrap{}, fmt.Errorf("initial user fetch: %w", err)
+ 	}
++	devices, err := p.client.GetDevices()
++	if err != nil {
++		// Global device sync is an optional panel capability. A node must still
++		// start against an unpatched panel and fall back to local enforcement.
++		nlog.Core().Warn("initial device fetch failed; using local device state", "error", err)
++	}
+ 	bootstrap.Config, err = model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
+ 	if err != nil {
+ 		return Bootstrap{}, fmt.Errorf("initial config normalize: %w", err)
+ 	}
+ 	bootstrap.Users = model.UserSpecsFromPanel(users)
++	bootstrap.DeviceUsers = devices
+ 	return bootstrap, nil
+ }
+ 
+@@ -77,16 +84,24 @@ func (p *PanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
+ 	if err != nil {
+ 		return Snapshot{}, fmt.Errorf("poll users: %w", err)
+ 	}
++	devices, err := p.client.GetDevices()
++	if err != nil {
++		nlog.Core().Warn("global device fetch failed; keeping previous state", "error", err)
++		devices = nil
++	}
+ 	select {
+ 	case <-ctx.Done():
+ 		return Snapshot{}, ctx.Err()
+ 	default:
+ 	}
+-	nodeSpec, err := model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
+-	if err != nil {
+-		return Snapshot{}, fmt.Errorf("poll config normalize: %w", err)
++	var nodeSpec *model.NodeSpec
++	if configSnapshot != nil {
++		nodeSpec, err = model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
++		if err != nil {
++			return Snapshot{}, fmt.Errorf("poll config normalize: %w", err)
++		}
+ 	}
+-	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users)}, nil
++	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users), DeviceUsers: devices}, nil
+ }
+ 
+ func (p *PanelControlPlane) Discover(ctx context.Context, metricsFn func() map[string]interface{}, events chan<- Event, statuses chan<- StatusChange) (PushClient, error) {
+diff --git a/internal/controlplane/types.go b/internal/controlplane/types.go
+index 1416d10..e8a525e 100644
+--- a/internal/controlplane/types.go
++++ b/internal/controlplane/types.go
+@@ -40,12 +40,14 @@ type Bootstrap struct {
+ 	Push         PushClient
+ 	Config       *model.NodeSpec
+ 	Users        []model.UserSpec
++	DeviceUsers  map[int][]string
+ 	Mailbox      *NodeMailbox
+ }
+ 
+ type Snapshot struct {
+-	Config *model.NodeSpec
+-	Users  []model.UserSpec
++	Config      *model.NodeSpec
++	Users       []model.UserSpec
++	DeviceUsers map[int][]string
+ }
+ 
+ type ReportPayload struct {
+diff --git a/internal/kernel/singbox/conntracker.go b/internal/kernel/singbox/conntracker.go
+index 77d6852..9bb8e96 100644
+--- a/internal/kernel/singbox/conntracker.go
++++ b/internal/kernel/singbox/conntracker.go
+@@ -4,7 +4,6 @@ import (
+ 	"context"
+ 	"io"
+ 	"net"
+-	"sort"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -123,9 +122,9 @@ func (u *userStats) aliveIPList() map[string]bool {
+ //   - Per-connection rate limit token accumulation (amortized WaitN)
+ type ConnTracker struct {
+ 	usersMu sync.RWMutex
+-	users   map[int]*userStats  // userID → stats
+-	uuidMap map[string]int      // UUID → userID (for lookup in RoutedConnection)
+-	connMap map[string]net.Conn // connID → conn (only for force-close support)
++	users   map[int]*userStats // userID → stats
++	uuidMap map[string]int     // UUID → userID (for lookup in RoutedConnection)
++	connMap map[string]connRef // connID → connection metadata for force-close support
+ 
+ 	idCounter atomic.Int64
+ 
+@@ -141,12 +140,18 @@ type ConnTracker struct {
+ 	globalLastUpdate time.Time
+ }
+ 
++type connRef struct {
++	conn     net.Conn
++	userID   int
++	sourceIP string
++}
++
+ // NewConnTracker creates a tracker.
+ func NewConnTracker(_ int) *ConnTracker {
+ 	return &ConnTracker{
+ 		users:         make(map[int]*userStats),
+ 		uuidMap:       make(map[string]int),
+-		connMap:       make(map[string]net.Conn),
++		connMap:       make(map[string]connRef),
+ 		globalDevices: make(map[int]map[string]bool),
+ 	}
+ }
+@@ -187,7 +192,30 @@ func (t *ConnTracker) UpdateGlobalDevices(users map[int][]string) {
+ 		t.globalDevices[uid] = m
+ 	}
+ 	t.globalLastUpdate = time.Now()
++	allowedSnapshot := make(map[int]map[string]bool, len(t.globalDevices))
++	for uid, ips := range t.globalDevices {
++		allowedSnapshot[uid] = ips
++	}
+ 	t.globalMu.Unlock()
++
++	// A fresh panel snapshot is authoritative for users it contains. Close
++	// established TCP sessions outside its allowed IP set so a cross-node
++	// excess device is not left alive until it reconnects.
++	t.usersMu.RLock()
++	toClose := make([]net.Conn, 0)
++	for _, ref := range t.connMap {
++		allowed, tracked := allowedSnapshot[ref.userID]
++		if tracked && !allowed[ref.sourceIP] && ref.conn != nil {
++			toClose = append(toClose, ref.conn)
++		}
++	}
++	t.usersMu.RUnlock()
++	for _, conn := range toClose {
++		_ = conn.Close()
++	}
++	if len(toClose) > 0 {
++		nlog.Core().Info("singbox: closed connections outside global device whitelist", "connections", len(toClose))
++	}
+ 	nlog.Core().Debug("global device state updated", "users", len(users))
+ }
+ 
+@@ -238,7 +266,7 @@ func (t *ConnTracker) RoutedConnection(
+ 
+ 	// Store conn reference for force-close support
+ 	t.usersMu.Lock()
+-	t.connMap[connID] = conn
++	t.connMap[connID] = connRef{conn: conn, userID: uid, sourceIP: sourceIP}
+ 	t.usersMu.Unlock()
+ 
+ 	var lim *rate.Limiter
+@@ -336,59 +364,39 @@ func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string
+ 	globalIPs := t.globalDevices[userID]
+ 	t.globalMu.RUnlock()
+ 
+-	// Stale or missing global state → local-only check
++	// Stale or missing global state → local-only check. Keep the existing
++	// admitted IPs stable: a new source IP is rejected once all slots are full.
+ 	if globalStale || globalIPs == nil {
+ 		if localCount < limit {
+ 			return false
+ 		}
+-		ipList := make([]string, 0, localCount+1)
+-		for ip := range localIPs {
+-			ipList = append(ipList, ip)
+-		}
+-		ipList = append(ipList, sourceIP)
+-		sort.Strings(ipList)
+-		for i := 0; i < limit && i < len(ipList); i++ {
+-			if ipList[i] == sourceIP {
+-				return false
+-			}
+-		}
+ 		nlog.Core().Debug("device limit: local over limit, rejecting",
+ 			"userID", userID, "ip", sourceIP, "localIPs", localCount, "limit", limit)
+ 		return true
+ 	}
+ 
+-	// Known globally (from other node)
++	// Known globally means the panel selected this IP as one of the currently
++	// allowed devices, even if this specific node has not seen it locally yet.
+ 	if globalIPs[sourceIP] {
+ 		return false
+ 	}
+ 
+-	// Merge local + global
+-	allIPs := make(map[string]bool)
+-	for ip := range localIPs {
++	// Fresh global state exists. Treat it as the authoritative allowed-device
++	// set from the panel, then include local not-yet-reported IPs only when
++	// there is still capacity. Do not use lexicographic replacement here: that
++	// lets a later device with a "smaller" IP steal the first device's slot.
++	allIPs := make(map[string]bool, len(globalIPs)+len(localIPs))
++	for ip := range globalIPs {
+ 		allIPs[ip] = true
+ 	}
+-	for ip := range globalIPs {
++	for ip := range localIPs {
+ 		allIPs[ip] = true
+ 	}
+-
+ 	if len(allIPs) < limit {
+ 		return false
+ 	}
+ 
+-	// Over limit → lexicographic selection
+-	ipList := make([]string, 0, len(allIPs)+1)
+-	for ip := range allIPs {
+-		ipList = append(ipList, ip)
+-	}
+-	ipList = append(ipList, sourceIP)
+-	sort.Strings(ipList)
+-
+-	for i := 0; i < limit && i < len(ipList); i++ {
+-		if ipList[i] == sourceIP {
+-			return false
+-		}
+-	}
+-	nlog.Core().Debug("device limit: total over limit, rejecting",
++	nlog.Core().Debug("device limit: global over limit, rejecting",
+ 		"userID", userID, "ip", sourceIP, "totalIPs", len(allIPs), "limit", limit)
+ 	return true
+ }
+@@ -443,13 +451,13 @@ func (t *ConnTracker) GetUserTraffic() (traffic map[int][2]int64, aliveIPs map[i
+ // CloseByID force-closes a connection by its ID.
+ func (t *ConnTracker) CloseByID(id string) bool {
+ 	t.usersMu.RLock()
+-	conn, ok := t.connMap[id]
++	ref, ok := t.connMap[id]
+ 	t.usersMu.RUnlock()
+ 	if !ok {
+ 		return false
+ 	}
+-	if conn != nil {
+-		conn.Close()
++	if ref.conn != nil {
++		ref.conn.Close()
+ 	}
+ 	return true
+ }
+diff --git a/internal/kernel/singbox/singbox_test.go b/internal/kernel/singbox/singbox_test.go
+index 1ad8732..22c7147 100644
+--- a/internal/kernel/singbox/singbox_test.go
++++ b/internal/kernel/singbox/singbox_test.go
+@@ -149,11 +149,11 @@ func TestConnTrackerCheckDeviceGateMergesFreshGlobalDevices(t *testing.T) {
+ 	us.addConn("1.1.1.1")
+ 	tracker.UpdateGlobalDevices(map[int][]string{1: {"9.9.9.9"}})
+ 
+-	if tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
+-		t.Fatal("expected lexicographically earlier candidate to remain allowed")
++	if !tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
++		t.Fatal("expected fresh global device state to keep existing slots stable and reject a third device")
+ 	}
+ 	if !tracker.checkDeviceGate(us, 1, "99.99.99.99", 2) {
+-		t.Fatal("expected merged local+global device state to reject lexicographically later third device")
++		t.Fatal("expected merged local+global device state to reject a third device")
+ 	}
+ 	if tracker.checkDeviceGate(us, 1, "1.1.1.1", 2) {
+ 		t.Fatal("existing local IP should still be allowed")
+diff --git a/internal/panel/client.go b/internal/panel/client.go
+index a725afc..c012685 100644
+--- a/internal/panel/client.go
++++ b/internal/panel/client.go
+@@ -280,6 +280,31 @@ func (c *Client) GetUsers() ([]User, error) {
+ 	return usersResp.Users, nil
+ }
+ 
++// GetDevices fetches the panel-aggregated global device snapshot.
++// It is used as a REST fallback when WebSocket sync.devices is unavailable.
++func (c *Client) GetDevices() (map[int][]string, error) {
++	path := "/api/v1/server/UniProxy/devices"
++	if c.machineID > 0 {
++		path = "/api/v2/server/devices"
++	}
++	resp, err := c.doRequest("GET", path, nil, "")
++	if err != nil {
++		return nil, fmt.Errorf("get devices: %w", err)
++	}
++	defer drainAndClose(resp.Body)
++
++	if resp.StatusCode != http.StatusOK {
++		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
++	}
++
++	var devicesResp DevicesResponse
++	if err := json.NewDecoder(resp.Body).Decode(&devicesResp); err != nil {
++		return nil, fmt.Errorf("decode devices: %w", err)
++	}
++	return devicesResp.Users, nil
++}
++
+ // PushTraffic submits per-user traffic data
+ func (c *Client) PushTraffic(data map[int][2]int64) error {
+ 	if len(data) == 0 {
+diff --git a/internal/panel/types.go b/internal/panel/types.go
+index 14a5cfd..acf3822 100644
+--- a/internal/panel/types.go
++++ b/internal/panel/types.go
+@@ -71,8 +71,8 @@ type MachineNode struct {
+ 
+ // MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
+ type MachineNodesResponse struct {
+-	Nodes      []MachineNode      `json:"nodes"`
+-	BaseConfig MachineBaseConfig  `json:"base_config"`
++	Nodes      []MachineNode     `json:"nodes"`
++	BaseConfig MachineBaseConfig `json:"base_config"`
+ }
+ 
+ // MachineBaseConfig holds polling intervals for machine mode.
+@@ -262,3 +262,25 @@ type User struct {
+ type UsersResponse struct {
+ 	Users []User `json:"users"`
+ }
++
++type DevicesResponse struct {
++	Users map[int][]string `json:"users"`
++}
++
++func (d *DevicesResponse) UnmarshalJSON(data []byte) error {
++	type Alias DevicesResponse
++	aux := &struct {
++		Users json.RawMessage `json:"users"`
++		*Alias
++	}{
++		Alias: (*Alias)(d),
++	}
++	if err := json.Unmarshal(data, &aux); err != nil {
++		return err
++	}
++	d.Users = make(map[int][]string)
++	if len(aux.Users) == 0 || string(aux.Users) == "[]" || string(aux.Users) == "null" {
++		return nil
++	}
++	return json.Unmarshal(aux.Users, &d.Users)
++}
+diff --git a/internal/service/service.go b/internal/service/service.go
+index 890940d..7106f25 100644
+--- a/internal/service/service.go
++++ b/internal/service/service.go
+@@ -82,6 +82,7 @@ type Service struct {
+ type pullResult struct {
+ 	config      *model.NodeSpec
+ 	users       []model.UserSpec
++	deviceUsers map[int][]string
+ 	configHash  string
+ 	userHash    string
+ 	certChanged bool
+@@ -218,12 +219,13 @@ func (s *Service) Run(ctx context.Context) error {
+ 			s.reportDevices()
+ 
+ 		case <-pullTicker.C:
+-			// When WebSocket is connected, skip REST polling entirely.
+-			// Config/user updates arrive via WS push.
++			// WebSocket pushes config and users, but panels without report.devices
++			// broadcasting still need REST polling to refresh global device state.
+ 			if s.wsClient != nil && s.wsClient.IsConnected() {
+-				continue
++				nlog.Core().Debug("polling global device state from API (ws connected)")
++			} else {
++				nlog.Core().Debug("polling from API (ws not connected)")
+ 			}
+-			nlog.Core().Debug("polling from API (ws not connected)")
+ 			s.pullViaAPIAsync(ctx)
+ 
+ 		case result := <-s.pullResults:
+@@ -297,6 +299,7 @@ func (s *Service) initialSetup(ctx context.Context) error {
+ 	s.metricsMu.Unlock()
+ 	s.lastConfigHash = computeConfigHash(bootstrap.Config)
+ 	s.updateUserState(bootstrap.Users)
++	s.kernel.UpdateGlobalDevices(bootstrap.DeviceUsers)
+ 
+ 	nlog.Core().Info("initial snapshot ready",
+ 		"protocol", bootstrap.Config.Protocol,
+@@ -633,6 +636,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
+ 			result.users = snapshot.Users
+ 			result.userHash = computeUserHash(snapshot.Users)
+ 		}
++		result.deviceUsers = snapshot.DeviceUsers
+ 
+ 		select {
+ 		case s.pullResults <- result:
+@@ -645,6 +649,9 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
+ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
+ 	s.wsResyncPending.Store(false)
+ 	configChanged := false
++	if result.deviceUsers != nil {
++		s.kernel.UpdateGlobalDevices(result.deviceUsers)
++	}
+ 
+ 	if result.certChanged {
+ 		nlog.Core().Info("certificate renewed, kernel restart needed")
