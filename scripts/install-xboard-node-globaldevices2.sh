@@ -12,8 +12,8 @@ BRANCH="${BRANCH:-main}"
 SERVICE="${SERVICE:-xboard-node.service}"
 BIN="${BIN:-/usr/local/bin/xboard-node}"
 CONFIG="${CONFIG:-/etc/xboard-node/config.yml}"
-EXPECTED_SHA256="${EXPECTED_SHA256:-67e44b846d1c2eeccabe5f418a23757f27c3fe6971c7602454e07267ef7b4769}"
-VERSION_EXPECT="xboard-node v1.13-openclaw-globaldevices3"
+EXPECTED_SHA256="${EXPECTED_SHA256:-309df4765cfe0dc56e0e27c5e147fb2bfb98c78ee628c94d6c86832a7dcc5d43}"
+VERSION_EXPECT="xboard-node v1.13-openclaw-globaldevices4"
 TMP_DIR="$(mktemp -d)"
 TMP_GZ="$TMP_DIR/xboard-node-global-device-linux-amd64.gz"
 TMP_BIN="$TMP_DIR/xboard-node"
@@ -59,7 +59,7 @@ if [ ! -x "$BIN" ]; then
 fi
 
 echo "== Current xboard-node version =="
-"$BIN" version 2>/dev/null || "$BIN" -v 2>/dev/null || true
+"$BIN" -v 2>/dev/null || true
 
 echo "== Download patched binary =="
 echo "$URL"
@@ -76,7 +76,7 @@ if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
 fi
 
 echo "== Verify patched version =="
-NEW_VERSION="$($TMP_BIN version 2>/dev/null || $TMP_BIN -v 2>/dev/null || true)"
+NEW_VERSION="$($TMP_BIN -v 2>/dev/null || true)"
 echo "$NEW_VERSION"
 case "$NEW_VERSION" in
   *"$VERSION_EXPECT"*) ;;
