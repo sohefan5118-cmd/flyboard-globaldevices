@@ -7,13 +7,13 @@ set -euo pipefail
 # Optional env:
 #   REPO="OWNER/REPO" BRANCH="main" SERVICE="xboard-node.service" bash install-xboard-node-globaldevices2.sh
 
-REPO="${REPO:-sohefan5118/flyboard-globaldevices}"
+REPO="${REPO:-sohefan5118-cmd/flyboard-globaldevices}"
 BRANCH="${BRANCH:-main}"
 SERVICE="${SERVICE:-xboard-node.service}"
 BIN="${BIN:-/usr/local/bin/xboard-node}"
 CONFIG="${CONFIG:-/etc/xboard-node/config.yml}"
-EXPECTED_SHA256="${EXPECTED_SHA256:-309df4765cfe0dc56e0e27c5e147fb2bfb98c78ee628c94d6c86832a7dcc5d43}"
-VERSION_EXPECT="xboard-node v1.13-openclaw-globaldevices4"
+EXPECTED_SHA256="${EXPECTED_SHA256:-d73c744fe9c8f7ca4c47e7c9aec64e3cdfdf0278efb33b3379dce8125899c81a}"
+VERSION_EXPECT="xboard-node v1.13-openclaw-globaldevices5"
 TMP_DIR="$(mktemp -d)"
 TMP_GZ="$TMP_DIR/xboard-node-global-device-linux-amd64.gz"
 TMP_BIN="$TMP_DIR/xboard-node"
@@ -29,9 +29,9 @@ need_cmd sha256sum
 need_cmd gzip
 need_cmd systemctl
 if command -v curl >/dev/null 2>&1; then
-  DL=(curl -fL --retry 3 --connect-timeout 15 -o "$TMP_GZ" "$URL")
+  DL_TOOL="curl"
 elif command -v wget >/dev/null 2>&1; then
-  DL=(wget -O "$TMP_GZ" "$URL")
+  DL_TOOL="wget"
 else
   echo "ERROR: need curl or wget" >&2
   exit 1
@@ -55,6 +55,29 @@ fi
 
 if [ ! -x "$BIN" ]; then
   echo "ERROR: $BIN not found/executable. Install xboard-node first, then run this replacer." >&2
+  exit 1
+fi
+
+PANEL_URL="$(sed -n 's/^[[:space:]]*url:[[:space:]]*//p' "$CONFIG" | head -n1)"
+MACHINE_ID="$(sed -n 's/^[[:space:]]*machine_id:[[:space:]]*//p' "$CONFIG" | head -n1 | tr -d '"')"
+TOKEN="$(sed -n 's/^[[:space:]]*token:[[:space:]]*//p' "$CONFIG" | head -n1 | tr -d '"')"
+if [ -z "$PANEL_URL" ] || [ -z "$MACHINE_ID" ] || [ -z "$TOKEN" ]; then
+  echo "ERROR: unable to parse panel url / machine_id / token from $CONFIG" >&2
+  exit 1
+fi
+DEVICE_URL="${PANEL_URL%/}/api/v2/server/devices?machine_id=${MACHINE_ID}&node_id=${MACHINE_ID}&token=${TOKEN}"
+if [ "$DL_TOOL" = "curl" ]; then
+  DL=(curl -fL --retry 3 --connect-timeout 15 -o "$TMP_GZ" "$URL")
+  FETCH_JSON=(curl -fsS --max-time 15 -o "$TMP_DIR/preflight-devices.json" "$DEVICE_URL")
+else
+  DL=(wget -O "$TMP_GZ" "$URL")
+  FETCH_JSON=(wget -qO "$TMP_DIR/preflight-devices.json" "$DEVICE_URL")
+fi
+
+echo "== Preflight panel devices route =="
+if ! "${FETCH_JSON[@]}"; then
+  echo "ERROR: cannot reach $DEVICE_URL" >&2
+  echo "ERROR: this usually means the running panel is missing /api/v2/server/devices or the token is invalid." >&2
   exit 1
 fi
 
@@ -97,8 +120,17 @@ echo "== Service status =="
 systemctl is-active "$SERVICE"
 systemctl status "$SERVICE" --no-pager -l | sed -n '1,30p'
 
+echo "== Post-install self-check =="
+sleep 8
+RECENT_LOGS="$(journalctl -u "$SERVICE" --since '2 minutes ago' --no-pager || true)"
+if printf '%s\n' "$RECENT_LOGS" | grep -q 'api/v2/server/devices could not be found'; then
+  echo "ERROR: node still reports /api/v2/server/devices as missing after install." >&2
+  echo "ERROR: the panel-side /api/v2/server/devices route is not available to this node yet." >&2
+  exit 1
+fi
+
 echo "== Recent logs =="
-journalctl -u "$SERVICE" -n 80 --no-pager || true
+printf '%s\n' "$RECENT_LOGS" | tail -n 80
 
 echo "DONE: installed $VERSION_EXPECT"
 echo "Rollback example: cp -a ${BIN}.bak-globaldevices-${TS} ${BIN} && systemctl restart ${SERVICE}"

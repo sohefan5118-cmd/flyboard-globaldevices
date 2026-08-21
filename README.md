@@ -20,14 +20,14 @@
 ## 当前发布版本
 
 ```text
-xboard-node v1.13-openclaw-globaldevices2 (built 2026-08-13T10:13:08Z)
+xboard-node v1.13-openclaw-globaldevices5 (built 2026-08-21T09:29:37Z)
 ```
 
 SHA256：
 
 ```text
-b27b5de949fafcdcdc8e700dd404b3fcf26aa4a7bb5420dedce32aeb7d7a5905  xboard-node-global-device-linux-amd64
-0f23c6a5db1382f92f8d50cfc9ab8b893231a9dda3f0b9713401ff2622d20b92  xboard-node-global-device-linux-amd64.gz
+d73c744fe9c8f7ca4c47e7c9aec64e3cdfdf0278efb33b3379dce8125899c81a  xboard-node-global-device-linux-amd64
+668d0f0f0ef7b52bc30e4b8061a89f533c712cd52ff0291b08bfb267db52c8c6  xboard-node-global-device-linux-amd64.gz
 ```
 
 ## 新节点安装方式
@@ -43,7 +43,7 @@ xboard-node.service
 然后在新节点服务器上执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sohefan5118/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
 ```
 
 如果你的仓库名不同：
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/YOUR_REPO/main/scripts/in
 成功后应看到：
 
 ```text
-xboard-node v1.13-openclaw-globaldevices2
+xboard-node v1.13-openclaw-globaldevices5
 active
 ```
 
@@ -64,7 +64,7 @@ active
 如果是新的 Flyboard/XBoard 面板，也要先安装面板补丁：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sohefan5118/flyboard-globaldevices/main/scripts/install-panel-machine-devices.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-panel-machine-devices.sh | bash
 ```
 
 默认容器名：`flyboard-xboard-1`，默认应用目录：`/www`。

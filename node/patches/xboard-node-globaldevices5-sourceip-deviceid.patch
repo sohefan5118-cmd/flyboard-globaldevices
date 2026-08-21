@@ -1,0 +1,1313 @@
+diff --git a/internal/kernel/singbox/conntracker.go b/internal/kernel/singbox/conntracker.go
+index 77d6852..d83657c 100644
+--- a/internal/kernel/singbox/conntracker.go
++++ b/internal/kernel/singbox/conntracker.go
+@@ -4,7 +4,6 @@ import (
+ 	"context"
+ 	"io"
+ 	"net"
+-	"sort"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -18,8 +17,8 @@ import (
+ 	"github.com/cedar2025/xboard-node/internal/nlog"
+ )
+ 
+-// ipPool caches ipSnapshot maps to reduce allocations.
+-var ipPool = sync.Pool{
++// devicePool caches deviceSnapshot maps to reduce allocations.
++var devicePool = sync.Pool{
+ 	New: func() interface{} {
+ 		return make(map[string]struct{}, 16)
+ 	},
+@@ -27,90 +26,90 @@ var ipPool = sync.Pool{
+ 
+ // ─── Per-user statistics ────────────────────────────────────────────────────
+ 
+-// userStats holds per-user traffic counters and alive IP tracking.
++// userStats holds per-user traffic counters and alive device-credential tracking.
+ // Traffic counters are lock-free atomics (read on every packet).
+-// IP tracking uses a lightweight mutex (only touched at connect/disconnect).
++// Device tracking uses a lightweight mutex (only touched at connect/disconnect).
+ type userStats struct {
+ 	upload   atomic.Int64
+ 	download atomic.Int64
+ 
+ 	mu        sync.RWMutex   // RWMutex for concurrent reads
+-	ips       map[string]int // sourceIP → refcount (number of active conns from that IP)
++	devices   map[string]int // deviceID/authUUID → refcount (number of active conns from that credential)
+ 	connCount int            // total active connections
+ }
+ 
+-// addConn registers a new connection from sourceIP.
+-func (u *userStats) addConn(sourceIP string) {
++// addConn registers a new connection from deviceID.
++func (u *userStats) addConn(deviceID string) {
+ 	u.mu.Lock()
+ 	u.connCount++
+-	u.ips[sourceIP]++
++	u.devices[deviceID]++
+ 	u.mu.Unlock()
+ }
+ 
+-// removeConn unregisters a connection from sourceIP.
+-func (u *userStats) removeConn(sourceIP string) {
++// removeConn unregisters a connection from deviceID.
++func (u *userStats) removeConn(deviceID string) {
+ 	u.mu.Lock()
+ 	u.connCount--
+-	u.ips[sourceIP]--
+-	if u.ips[sourceIP] <= 0 {
+-		delete(u.ips, sourceIP)
++	u.devices[deviceID]--
++	if u.devices[deviceID] <= 0 {
++		delete(u.devices, deviceID)
+ 	}
+ 	u.mu.Unlock()
+ }
+ 
+-// distinctIPs returns the number of distinct IPs currently connected.
+-func (u *userStats) distinctIPs() int {
++// distinctDevices returns the number of distinct credentials currently connected.
++func (u *userStats) distinctDevices() int {
+ 	u.mu.Lock()
+-	n := len(u.ips)
++	n := len(u.devices)
+ 	u.mu.Unlock()
+ 	return n
+ }
+ 
+-// ipSnapshot returns a pooled copy of the current IP set.
+-func (u *userStats) ipSnapshot() map[string]struct{} {
+-	cp := ipPool.Get().(map[string]struct{})
++// deviceSnapshot returns a pooled copy of the current credential set.
++func (u *userStats) deviceSnapshot() map[string]struct{} {
++	cp := devicePool.Get().(map[string]struct{})
+ 	for k := range cp {
+ 		delete(cp, k)
+ 	}
+ 	u.mu.Lock()
+-	for ip := range u.ips {
+-		cp[ip] = struct{}{}
++	for device := range u.devices {
++		cp[device] = struct{}{}
+ 	}
+ 	u.mu.Unlock()
+ 	return cp
+ }
+ 
+-// releaseIPSnapshot returns the snapshot to pool.
++// releaseDeviceSnapshot returns the snapshot to pool.
+ // Large maps are discarded to prevent memory bloat.
+-func releaseIPSnapshot(m map[string]struct{}) {
++func releaseDeviceSnapshot(m map[string]struct{}) {
+ 	// Discard large maps to prevent pool memory bloat
+ 	if len(m) > 64 {
+ 		return
+ 	}
+-	ipPool.Put(m)
++	devicePool.Put(m)
+ }
+ 
+-// aliveIPList returns the set of alive IPs as a boolean map (for reporting).
+-func (u *userStats) aliveIPList() map[string]bool {
++// aliveDeviceList returns the set of alive device credentials as a boolean map (for reporting).
++func (u *userStats) aliveDeviceList() map[string]bool {
+ 	u.mu.Lock()
+ 	defer u.mu.Unlock()
+-	if len(u.ips) == 0 {
++	if len(u.devices) == 0 {
+ 		return nil
+ 	}
+-	result := make(map[string]bool, len(u.ips))
+-	for ip := range u.ips {
+-		result[ip] = true
++	result := make(map[string]bool, len(u.devices))
++	for device := range u.devices {
++		result[device] = true
+ 	}
+ 	return result
+ }
+ 
+ // ─── ConnTracker ────────────────────────────────────────────────────────────
+ 
+-// ConnTracker provides per-user traffic counting, alive IP tracking, device
++// ConnTracker provides per-user traffic counting, alive device tracking, device
+ // limit gate-keeping, and per-user speed limiting for the sing-box kernel.
+ //
+ // Architecture: instead of maintaining a per-connection map (O(connections)),
+-// it maintains per-user atomic counters and IP refcount sets (O(users)).
++// it maintains per-user atomic counters and device refcount sets (O(users)).
+ // This means:
+ //   - GetUserTraffic is O(users), not O(connections)
+ //   - No Snapshot/pending buffer needed
+@@ -119,13 +118,13 @@ func (u *userStats) aliveIPList() map[string]bool {
+ //
+ // The per-connection wrapper (trackedConn) is still needed for:
+ //   - Hooking into sing's ReadCounter/WriteCounter for zero-copy byte counting
+-//   - Close callback to decrement IP refcounts
++//   - Close callback to decrement device refcounts
+ //   - Per-connection rate limit token accumulation (amortized WaitN)
+ type ConnTracker struct {
+ 	usersMu sync.RWMutex
+-	users   map[int]*userStats  // userID → stats
+-	uuidMap map[string]int      // UUID → userID (for lookup in RoutedConnection)
+-	connMap map[string]net.Conn // connID → conn (only for force-close support)
++	users   map[int]*userStats // userID → stats
++	uuidMap map[string]int     // UUID → userID (for lookup in RoutedConnection)
++	connMap map[string]connRef // connID → connection metadata for force-close support
+ 
+ 	idCounter atomic.Int64
+ 
+@@ -136,17 +135,23 @@ type ConnTracker struct {
+ 	deviceLimitFunc atomic.Pointer[func(uuid string) (int, bool)]
+ 
+ 	// Multi-node device state from panel
+-	globalDevices    map[int]map[string]bool // userID → IP → exists
++	globalDevices    map[int]map[string]bool // userID → auth credential/deviceID → exists
+ 	globalMu         sync.RWMutex
+ 	globalLastUpdate time.Time
+ }
+ 
++type connRef struct {
++	close    func() error
++	userID   int
++	deviceID string
++}
++
+ // NewConnTracker creates a tracker.
+ func NewConnTracker(_ int) *ConnTracker {
+ 	return &ConnTracker{
+ 		users:         make(map[int]*userStats),
+ 		uuidMap:       make(map[string]int),
+-		connMap:       make(map[string]net.Conn),
++		connMap:       make(map[string]connRef),
+ 		globalDevices: make(map[int]map[string]bool),
+ 	}
+ }
+@@ -169,7 +174,7 @@ func (t *ConnTracker) SetUserMap(m map[string]int) {
+ 	t.uuidMap = m
+ 	for _, uid := range m {
+ 		if _, ok := t.users[uid]; !ok {
+-			t.users[uid] = &userStats{ips: make(map[string]int)}
++			t.users[uid] = &userStats{devices: make(map[string]int)}
+ 		}
+ 	}
+ 	t.usersMu.Unlock()
+@@ -179,15 +184,38 @@ func (t *ConnTracker) SetUserMap(m map[string]int) {
+ func (t *ConnTracker) UpdateGlobalDevices(users map[int][]string) {
+ 	t.globalMu.Lock()
+ 	t.globalDevices = make(map[int]map[string]bool, len(users))
+-	for uid, ips := range users {
+-		m := make(map[string]bool, len(ips))
+-		for _, ip := range ips {
+-			m[ip] = true
++	for uid, devices := range users {
++		m := make(map[string]bool, len(devices))
++		for _, device := range devices {
++			m[device] = true
+ 		}
+ 		t.globalDevices[uid] = m
+ 	}
+ 	t.globalLastUpdate = time.Now()
++	allowedSnapshot := make(map[int]map[string]bool, len(t.globalDevices))
++	for uid, devices := range t.globalDevices {
++		allowedSnapshot[uid] = devices
++	}
+ 	t.globalMu.Unlock()
++
++	// A fresh panel snapshot is authoritative for users it contains. Close
++	// established sessions outside its allowed device credential set so a
++	// cross-node excess device is not left alive until it reconnects.
++	t.usersMu.RLock()
++	toClose := make([]func() error, 0)
++	for _, ref := range t.connMap {
++		allowed, tracked := allowedSnapshot[ref.userID]
++		if tracked && !allowed[ref.deviceID] && ref.close != nil {
++			toClose = append(toClose, ref.close)
++		}
++	}
++	t.usersMu.RUnlock()
++	for _, closeConn := range toClose {
++		_ = closeConn()
++	}
++	if len(toClose) > 0 {
++		nlog.Core().Info("singbox: closed connections outside global device whitelist", "connections", len(toClose))
++	}
+ 	nlog.Core().Debug("global device state updated", "users", len(users))
+ }
+ 
+@@ -202,7 +230,7 @@ func (t *ConnTracker) ClearGlobalDevices() {
+ 
+ // ─── adapter.ConnectionTracker ──────────────────────────────────────────────
+ 
+-// RoutedConnection wraps a TCP conn to count bytes per-user, track IPs,
++// RoutedConnection wraps a TCP conn to count bytes per-user, track device credentials,
+ // and optionally rate-limit. Gate-keeps device limits at connection time.
+ func (t *ConnTracker) RoutedConnection(
+ 	ctx context.Context, conn net.Conn,
+@@ -211,6 +239,7 @@ func (t *ConnTracker) RoutedConnection(
+ ) net.Conn {
+ 	uuid := metadata.User
+ 	sourceIP := metadata.Source.Addr.String()
++	deviceID := sourceIP
+ 
+ 	t.usersMu.RLock()
+ 	uid := t.uuidMap[uuid]
+@@ -220,9 +249,9 @@ func (t *ConnTracker) RoutedConnection(
+ 	// Device limit gate-keeping
+ 	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
+ 		if limit, hasLimit := (*dlf)(uuid); hasLimit {
+-			if t.checkDeviceGate(us, uid, sourceIP, limit) {
++			if t.checkDeviceGate(us, uid, deviceID, limit) {
+ 				nlog.Core().Info("singbox: device limit gate-keep, rejecting connection",
+-					"user", uuid, "ip", sourceIP, "limit", limit)
++					"user", uuid, "device", deviceID, "ip", sourceIP, "limit", limit)
+ 				conn.Close()
+ 				return conn
+ 			}
+@@ -231,37 +260,39 @@ func (t *ConnTracker) RoutedConnection(
+ 
+ 	// Register connection
+ 	if us != nil {
+-		us.addConn(sourceIP)
++		us.addConn(deviceID)
+ 	}
+ 
+ 	connID := t.nextID()
+ 
+-	// Store conn reference for force-close support
+-	t.usersMu.Lock()
+-	t.connMap[connID] = conn
+-	t.usersMu.Unlock()
+-
+ 	var lim *rate.Limiter
+ 	if slf := t.speedLimitFunc.Load(); slf != nil {
+ 		lim = (*slf)(uuid)
+ 	}
+ 
+-	return &trackedConn{
++	wrapped := &trackedConn{
+ 		Conn:     conn,
+ 		tracker:  t,
+ 		us:       us,
+ 		userID:   uid,
+ 		connID:   connID,
+-		sourceIP: sourceIP,
++		deviceID: deviceID,
+ 		limiter:  lim,
+ 		ctx:      ctx,
+ 	}
++
++	// Store the wrapper close callback for force-close support. Closing the
++	// wrapper also decrements local device counters immediately.
++	t.usersMu.Lock()
++	t.connMap[connID] = connRef{close: wrapped.Close, userID: uid, deviceID: deviceID}
++	t.usersMu.Unlock()
++
++	return wrapped
+ }
+ 
+-// RoutedPacketConnection wraps UDP with per-user counting (UDP not in connMap).
+-// Note: UDP connections are NOT stored in connMap because connMap is typed as
+-// map[string]net.Conn, but PacketConn is a different interface. Force-close
+-// for UDP connections is handled directly via trackedPacketConn.Close().
++// RoutedPacketConnection wraps UDP with per-user counting and stores force-close
++// metadata in connMap just like TCP. The close callback releases device counters
++// exactly once via trackedPacketConn.Close().
+ func (t *ConnTracker) RoutedPacketConnection(
+ 	ctx context.Context, conn N.PacketConn,
+ 	metadata adapter.InboundContext,
+@@ -269,6 +300,7 @@ func (t *ConnTracker) RoutedPacketConnection(
+ ) N.PacketConn {
+ 	uuid := metadata.User
+ 	sourceIP := metadata.Source.Addr.String()
++	deviceID := sourceIP
+ 
+ 	t.usersMu.RLock()
+ 	uid := t.uuidMap[uuid]
+@@ -278,9 +310,9 @@ func (t *ConnTracker) RoutedPacketConnection(
+ 	// Device limit gate-keeping
+ 	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
+ 		if limit, hasLimit := (*dlf)(uuid); hasLimit {
+-			if t.checkDeviceGate(us, uid, sourceIP, limit) {
++			if t.checkDeviceGate(us, uid, deviceID, limit) {
+ 				nlog.Core().Info("singbox: device limit gate-keep, rejecting UDP connection",
+-					"user", uuid, "ip", sourceIP, "limit", limit)
++					"user", uuid, "device", deviceID, "ip", sourceIP, "limit", limit)
+ 				conn.Close()
+ 				return conn
+ 			}
+@@ -288,7 +320,7 @@ func (t *ConnTracker) RoutedPacketConnection(
+ 	}
+ 
+ 	if us != nil {
+-		us.addConn(sourceIP)
++		us.addConn(deviceID)
+ 	}
+ 
+ 	connID := t.nextID()
+@@ -298,98 +330,78 @@ func (t *ConnTracker) RoutedPacketConnection(
+ 		lim = (*slf)(uuid)
+ 	}
+ 
+-	return &trackedPacketConn{
++	wrapped := &trackedPacketConn{
+ 		PacketConn: conn,
+ 		tracker:    t,
+ 		us:         us,
+ 		userID:     uid,
+ 		connID:     connID,
+-		sourceIP:   sourceIP,
++		deviceID:   deviceID,
+ 		limiter:    lim,
+ 		ctx:        ctx,
+ 	}
++
++	// UDP/QUIC sessions are packet connections, not net.Conn. Keep the same
++	// force-close metadata so global device sync can clear them too.
++	t.usersMu.Lock()
++	t.connMap[connID] = connRef{close: wrapped.Close, userID: uid, deviceID: deviceID}
++	t.usersMu.Unlock()
++
++	return wrapped
+ }
+ 
+ // checkDeviceGate rejects connections exceeding device limit.
+ // Strategy: merge local + global state when fresh; local-only when stale.
+-func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string, limit int) bool {
++// The device key is the authenticated credential UUID/password, not source IP.
++func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, deviceID string, limit int) bool {
+ 	if us == nil || limit <= 0 {
+ 		return false
+ 	}
+ 
+ 	us.mu.RLock()
+-	localIPs := make(map[string]bool, len(us.ips))
+-	for ip := range us.ips {
+-		localIPs[ip] = true
++	localDevices := make(map[string]bool, len(us.devices))
++	for device := range us.devices {
++		localDevices[device] = true
+ 	}
+-	localCount := len(us.ips)
++	localCount := len(us.devices)
+ 	us.mu.RUnlock()
+ 
+-	// Already known locally
+-	if localIPs[sourceIP] {
+-		return false
+-	}
+-
+ 	// Check global state freshness
+ 	t.globalMu.RLock()
+ 	globalStale := time.Since(t.globalLastUpdate) > 60*time.Second
+-	globalIPs := t.globalDevices[userID]
++	globalDevices := t.globalDevices[userID]
+ 	t.globalMu.RUnlock()
+ 
+-	// Stale or missing global state → local-only check
+-	if globalStale || globalIPs == nil {
+-		if localCount < limit {
++	// Stale or missing global state → local-only check. Keep the existing
++	// admitted credentials stable: a new credential is rejected once all slots are full.
++	if globalStale || globalDevices == nil {
++		if localDevices[deviceID] {
+ 			return false
+ 		}
+-		ipList := make([]string, 0, localCount+1)
+-		for ip := range localIPs {
+-			ipList = append(ipList, ip)
+-		}
+-		ipList = append(ipList, sourceIP)
+-		sort.Strings(ipList)
+-		for i := 0; i < limit && i < len(ipList); i++ {
+-			if ipList[i] == sourceIP {
+-				return false
+-			}
++		if localCount < limit {
++			return false
+ 		}
+ 		nlog.Core().Debug("device limit: local over limit, rejecting",
+-			"userID", userID, "ip", sourceIP, "localIPs", localCount, "limit", limit)
++			"userID", userID, "device", deviceID, "localDevices", localCount, "limit", limit)
+ 		return true
+ 	}
+ 
+-	// Known globally (from other node)
+-	if globalIPs[sourceIP] {
++	// Once a fresh global snapshot exists it is authoritative. In particular,
++	// do not let a locally remembered credential bypass the panel whitelist after
++	// that credential has been removed on another node.
++	if globalDevices[deviceID] {
+ 		return false
+ 	}
+ 
+-	// Merge local + global
+-	allIPs := make(map[string]bool)
+-	for ip := range localIPs {
+-		allIPs[ip] = true
+-	}
+-	for ip := range globalIPs {
+-		allIPs[ip] = true
+-	}
+-
+-	if len(allIPs) < limit {
++	// An empty fresh set is the bootstrap state: admit the first local credential
++	// so it can be reported to the panel. Once the panel selects a credential,
++	// every other credential must be present in the authoritative set.
++	if len(globalDevices) == 0 && localCount == 0 {
+ 		return false
+ 	}
+ 
+-	// Over limit → lexicographic selection
+-	ipList := make([]string, 0, len(allIPs)+1)
+-	for ip := range allIPs {
+-		ipList = append(ipList, ip)
+-	}
+-	ipList = append(ipList, sourceIP)
+-	sort.Strings(ipList)
+-
+-	for i := 0; i < limit && i < len(ipList); i++ {
+-		if ipList[i] == sourceIP {
+-			return false
+-		}
+-	}
+-	nlog.Core().Debug("device limit: total over limit, rejecting",
+-		"userID", userID, "ip", sourceIP, "totalIPs", len(allIPs), "limit", limit)
++	nlog.Core().Debug("device limit: global whitelist rejecting",
++		"userID", userID, "device", deviceID, "allowedDevices", len(globalDevices), "limit", limit)
+ 	return true
+ }
+ 
+@@ -414,7 +426,7 @@ func formatInt36(n int64) string {
+ 
+ // ─── Public API ─────────────────────────────────────────────────────────────
+ 
+-// GetUserTraffic returns per-user cumulative traffic and alive IPs.
++// GetUserTraffic returns per-user cumulative traffic and alive device credentials.
+ // This is O(users), not O(connections).
+ func (t *ConnTracker) GetUserTraffic() (traffic map[int][2]int64, aliveIPs map[int]map[string]bool, connCount int) {
+ 	t.usersMu.RLock()
+@@ -427,9 +439,9 @@ func (t *ConnTracker) GetUserTraffic() (traffic map[int][2]int64, aliveIPs map[i
+ 			traffic[uid] = [2]int64{up, down}
+ 		}
+ 
+-		ips := us.aliveIPList()
+-		if ips != nil {
+-			aliveIPs[uid] = ips
++		devices := us.aliveDeviceList()
++		if devices != nil {
++			aliveIPs[uid] = devices
+ 		}
+ 
+ 		us.mu.Lock()
+@@ -443,23 +455,41 @@ func (t *ConnTracker) GetUserTraffic() (traffic map[int][2]int64, aliveIPs map[i
+ // CloseByID force-closes a connection by its ID.
+ func (t *ConnTracker) CloseByID(id string) bool {
+ 	t.usersMu.RLock()
+-	conn, ok := t.connMap[id]
++	ref, ok := t.connMap[id]
+ 	t.usersMu.RUnlock()
+ 	if !ok {
+ 		return false
+ 	}
+-	if conn != nil {
+-		conn.Close()
++	if ref.close != nil {
++		_ = ref.close()
+ 	}
+ 	return true
+ }
+ 
+-// CloseByUUID force-closes ALL connections for a given user UUID.
++// CloseByUUID force-closes ALL tracked TCP/UDP connections for a given user UUID.
+ func (t *ConnTracker) CloseByUUID(uuid string) int {
+-	// This is a no-op for now — sing-box doesn't expose per-user connection
+-	// kill easily. The kernel's RemoveUsers removes the inbound user which
+-	// prevents new connections, and existing connections will fail on next I/O.
+-	return 0
++	t.usersMu.RLock()
++	uid, ok := t.uuidMap[uuid]
++	if !ok || uid == 0 {
++		t.usersMu.RUnlock()
++		return 0
++	}
++
++	toClose := make([]func() error, 0)
++	for _, ref := range t.connMap {
++		if ref.userID == uid && ref.close != nil {
++			toClose = append(toClose, ref.close)
++		}
++	}
++	t.usersMu.RUnlock()
++
++	for _, closeConn := range toClose {
++		_ = closeConn()
++	}
++	if len(toClose) > 0 {
++		nlog.Core().Info("singbox: force-closed user connections", "user", uuid, "connections", len(toClose))
++	}
++	return len(toClose)
+ }
+ 
+ // ActiveCount returns the total number of active connections.
+@@ -560,10 +590,10 @@ func (r *RateLimitedReadCloser) Read(b []byte) (int, error) {
+ type trackedConn struct {
+ 	net.Conn
+ 	tracker  *ConnTracker
+-	us       *userStats // per-user stats (upload/download atomics + IP tracking)
++	us       *userStats // per-user stats (upload/download atomics + device tracking)
+ 	userID   int        // user ID for device tracking
+ 	connID   string
+-	sourceIP string
++	deviceID string
+ 	limiter  *rate.Limiter
+ 	ctx      context.Context
+ 	closed   atomic.Bool
+@@ -634,7 +664,7 @@ func (c *trackedConn) Write(b []byte) (int, error) {
+ func (c *trackedConn) Close() error {
+ 	if c.closed.CompareAndSwap(false, true) {
+ 		if c.us != nil {
+-			c.us.removeConn(c.sourceIP)
++			c.us.removeConn(c.deviceID)
+ 		}
+ 		c.tracker.removeConnRef(c.connID)
+ 	}
+@@ -692,7 +722,7 @@ type trackedPacketConn struct {
+ 	us       *userStats
+ 	userID   int
+ 	connID   string
+-	sourceIP string
++	deviceID string
+ 	limiter  *rate.Limiter
+ 	ctx      context.Context
+ 	closed   atomic.Bool
+@@ -757,7 +787,7 @@ func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, dest singM.Socksaddr
+ func (c *trackedPacketConn) Close() error {
+ 	if c.closed.CompareAndSwap(false, true) {
+ 		if c.us != nil {
+-			c.us.removeConn(c.sourceIP)
++			c.us.removeConn(c.deviceID)
+ 		}
+ 		c.tracker.removeConnRef(c.connID)
+ 	}
+diff --git a/internal/kernel/singbox/singbox_test.go b/internal/kernel/singbox/singbox_test.go
+index 1ad8732..6ceb807 100644
+--- a/internal/kernel/singbox/singbox_test.go
++++ b/internal/kernel/singbox/singbox_test.go
+@@ -36,8 +36,6 @@ func TestSingBoxCapabilities(t *testing.T) {
+ 	}
+ }
+ 
+-
+-
+ type testConn struct {
+ 	closed bool
+ 	reads  [][]byte
+@@ -60,11 +58,11 @@ func (c *testConn) Write(b []byte) (int, error) {
+ 	return len(b), nil
+ }
+ 
+-func (c *testConn) Close() error { c.closed = true; return nil }
+-func (c *testConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
+-func (c *testConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
+-func (c *testConn) SetDeadline(time.Time) error { return nil }
+-func (c *testConn) SetReadDeadline(time.Time) error { return nil }
++func (c *testConn) Close() error                     { c.closed = true; return nil }
++func (c *testConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
++func (c *testConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
++func (c *testConn) SetDeadline(time.Time) error      { return nil }
++func (c *testConn) SetReadDeadline(time.Time) error  { return nil }
+ func (c *testConn) SetWriteDeadline(time.Time) error { return nil }
+ 
+ func testInboundContext(uuid, ip string) adapter.InboundContext {
+@@ -74,7 +72,7 @@ func testInboundContext(uuid, ip string) adapter.InboundContext {
+ 	}
+ }
+ 
+-func TestConnTrackerRoutedConnectionTracksTrafficAndAliveIPs(t *testing.T) {
++func TestConnTrackerRoutedConnectionTracksTrafficAndAliveDevices(t *testing.T) {
+ 	tracker := NewConnTracker(0)
+ 	tracker.SetUserMap(map[string]int{"uuid-1": 1})
+ 	base := &testConn{reads: [][]byte{[]byte("hello")}}
+@@ -93,12 +91,12 @@ func TestConnTrackerRoutedConnectionTracksTrafficAndAliveIPs(t *testing.T) {
+ 		t.Fatalf("Write() error = %v", err)
+ 	}
+ 
+-	traffic, aliveIPs, connCount := tracker.GetUserTraffic()
++	traffic, aliveDevices, connCount := tracker.GetUserTraffic()
+ 	if got := traffic[1]; got != [2]int64{5, 3} {
+ 		t.Fatalf("traffic[1] = %v, want [5 3]", got)
+ 	}
+-	if !aliveIPs[1]["1.1.1.1"] {
+-		t.Fatal("expected alive IP to include source address")
++	if !aliveDevices[1]["1.1.1.1"] {
++		t.Fatal("expected alive devices to include source IP device identifier")
+ 	}
+ 	if connCount != 1 {
+ 		t.Fatalf("connCount = %d, want 1", connCount)
+@@ -107,9 +105,9 @@ func TestConnTrackerRoutedConnectionTracksTrafficAndAliveIPs(t *testing.T) {
+ 	if err := wrapped.Close(); err != nil {
+ 		t.Fatalf("Close() error = %v", err)
+ 	}
+-	_, aliveIPs, connCount = tracker.GetUserTraffic()
+-	if aliveIPs[1] != nil {
+-		t.Fatalf("aliveIPs after close = %v, want nil", aliveIPs[1])
++	_, aliveDevices, connCount = tracker.GetUserTraffic()
++	if aliveDevices[1] != nil {
++		t.Fatalf("aliveDevices after close = %v, want nil", aliveDevices[1])
+ 	}
+ 	if connCount != 0 {
+ 		t.Fatalf("connCount after close = %d, want 0", connCount)
+@@ -118,9 +116,9 @@ func TestConnTrackerRoutedConnectionTracksTrafficAndAliveIPs(t *testing.T) {
+ 
+ func TestConnTrackerRoutedConnectionRejectsWhenDeviceLimitExceeded(t *testing.T) {
+ 	tracker := NewConnTracker(0)
+-	tracker.SetUserMap(map[string]int{"uuid-1": 1})
++	tracker.SetUserMap(map[string]int{"uuid-1": 1, "uuid-2": 1})
+ 	tracker.SetDeviceLimitFunc(func(uuid string) (int, bool) {
+-		if uuid != "uuid-1" {
++		if uuid != "uuid-1" && uuid != "uuid-2" {
+ 			return 0, false
+ 		}
+ 		return 1, true
+@@ -129,37 +127,78 @@ func TestConnTrackerRoutedConnectionRejectsWhenDeviceLimitExceeded(t *testing.T)
+ 	first := &testConn{}
+ 	wrapped1 := tracker.RoutedConnection(context.Background(), first, testInboundContext("uuid-1", "1.1.1.1"), nil, nil)
+ 	if wrapped1 == first {
+-		t.Fatal("expected first connection to be wrapped")
++		t.Fatal("expected first credential connection to be wrapped")
+ 	}
+ 
+-	second := &testConn{}
+-	wrapped2 := tracker.RoutedConnection(context.Background(), second, testInboundContext("uuid-1", "2.2.2.2"), nil, nil)
+-	if wrapped2 != second {
+-		t.Fatal("expected rejected connection to be returned unwrapped")
++	// Same account credential behind a different source IP is a different device
++	// and must be rejected when device_limit=1. This is the strict global
++	// behavior required by the panel: one account may not use two devices.
++	sameCredentialDifferentIP := &testConn{}
++	wrappedSame := tracker.RoutedConnection(context.Background(), sameCredentialDifferentIP, testInboundContext("uuid-1", "2.2.2.2"), nil, nil)
++	if wrappedSame != sameCredentialDifferentIP {
++		t.Fatal("expected same credential from a second IP/device to be rejected and returned unwrapped")
+ 	}
+-	if !second.closed {
+-		t.Fatal("expected rejected connection to be closed")
++	if !sameCredentialDifferentIP.closed {
++		t.Fatal("expected rejected second IP/device connection to be closed")
++	}
++
++	// A different credential sharing the already-allowed source IP is the same
++	// device identifier for limit purposes and should not consume another slot.
++	secondCredentialSameIP := &testConn{}
++	wrapped2 := tracker.RoutedConnection(context.Background(), secondCredentialSameIP, testInboundContext("uuid-2", "1.1.1.1"), nil, nil)
++	if wrapped2 == secondCredentialSameIP {
++		t.Fatal("expected second credential on the same IP/device to be accepted and wrapped")
+ 	}
+ }
+ 
+-func TestConnTrackerCheckDeviceGateMergesFreshGlobalDevices(t *testing.T) {
++func TestConnTrackerCheckDeviceGateUsesFreshGlobalWhitelistAuthoritatively(t *testing.T) {
+ 	tracker := NewConnTracker(0)
+ 	tracker.SetUserMap(map[string]int{"uuid-1": 1})
+ 	us := tracker.users[1]
+ 	us.addConn("1.1.1.1")
+-	tracker.UpdateGlobalDevices(map[int][]string{1: {"9.9.9.9"}})
++	tracker.UpdateGlobalDevices(map[int][]string{1: {"1.1.1.1"}})
+ 
+-	if tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
+-		t.Fatal("expected lexicographically earlier candidate to remain allowed")
++	if !tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
++		t.Fatal("expected unknown device/IP to be rejected by fresh global whitelist")
+ 	}
+-	if !tracker.checkDeviceGate(us, 1, "99.99.99.99", 2) {
+-		t.Fatal("expected merged local+global device state to reject lexicographically later third device")
++	if !tracker.checkDeviceGate(us, 1, "3.3.3.3", 2) {
++		t.Fatal("expected another unknown device/IP to be rejected by fresh global whitelist")
+ 	}
+ 	if tracker.checkDeviceGate(us, 1, "1.1.1.1", 2) {
+-		t.Fatal("existing local IP should still be allowed")
++		t.Fatal("expected globally allowed device/IP to be accepted")
++	}
++}
++
++func TestConnTrackerFreshGlobalWhitelistOverridesLocalState(t *testing.T) {
++	tracker := NewConnTracker(0)
++	tracker.SetUserMap(map[string]int{"uuid-1": 1})
++	tracker.SetDeviceLimitFunc(func(uuid string) (int, bool) {
++		return 1, uuid == "uuid-1"
++	})
++	us := tracker.users[1]
++	us.addConn("1.1.1.1")
++	tracker.UpdateGlobalDevices(map[int][]string{1: {"1.1.1.1"}})
++
++	if !tracker.checkDeviceGate(us, 1, "2.2.2.2", 1) {
++		t.Fatal("expected unknown device/IP to be rejected by fresh global whitelist")
++	}
++	if tracker.checkDeviceGate(us, 1, "1.1.1.1", 1) {
++		t.Fatal("expected globally allowed device/IP to be accepted")
+ 	}
+-	if tracker.checkDeviceGate(us, 1, "9.9.9.9", 2) {
+-		t.Fatal("existing global IP should still be allowed")
++}
++
++func TestConnTrackerFreshEmptyGlobalWhitelistAllowsBootstrapOnly(t *testing.T) {
++	tracker := NewConnTracker(0)
++	tracker.SetUserMap(map[string]int{"uuid-1": 1})
++	us := tracker.users[1]
++	tracker.UpdateGlobalDevices(map[int][]string{1: {}})
++
++	if tracker.checkDeviceGate(us, 1, "uuid-1", 1) {
++		t.Fatal("expected first credential to be admitted for bootstrap reporting")
++	}
++	us.addConn("1.1.1.1")
++	if !tracker.checkDeviceGate(us, 1, "uuid-2", 1) {
++		t.Fatal("expected second credential to be rejected by fresh empty whitelist")
+ 	}
+ }
+ 
+@@ -180,6 +219,29 @@ func TestConnTrackerCloseByIDClosesTrackedConnection(t *testing.T) {
+ 	}
+ }
+ 
++func TestConnTrackerCloseByUUIDClosesUserConnections(t *testing.T) {
++	tracker := NewConnTracker(0)
++	tracker.SetUserMap(map[string]int{"uuid-1": 1, "uuid-2": 2})
++
++	base1 := &testConn{}
++	base2 := &testConn{}
++	baseOther := &testConn{}
++
++	tracker.RoutedConnection(context.Background(), base1, testInboundContext("uuid-1", "1.1.1.1"), nil, nil)
++	tracker.RoutedConnection(context.Background(), base2, testInboundContext("uuid-1", "1.1.1.2"), nil, nil)
++	tracker.RoutedConnection(context.Background(), baseOther, testInboundContext("uuid-2", "2.2.2.2"), nil, nil)
++
++	if n := tracker.CloseByUUID("uuid-1"); n != 2 {
++		t.Fatalf("CloseByUUID() = %d, want 2", n)
++	}
++	if !base1.closed || !base2.closed {
++		t.Fatal("expected uuid-1 connections to be closed")
++	}
++	if baseOther.closed {
++		t.Fatal("did not expect other user connection to be closed")
++	}
++}
++
+ func TestConnTrackerRateLimitHonorsContextCancellation(t *testing.T) {
+ 	tracker := NewConnTracker(0)
+ 	tracker.SetUserMap(map[string]int{"uuid-1": 1})
+diff --git a/internal/kernel/xray/dispatcher.go b/internal/kernel/xray/dispatcher.go
+index 18ebe32..85fdf97 100644
+--- a/internal/kernel/xray/dispatcher.go
++++ b/internal/kernel/xray/dispatcher.go
+@@ -4,9 +4,9 @@ import (
+ 	"context"
+ 	"errors"
+ 	"reflect"
+-	"sort"
+ 	"sync"
+ 	"sync/atomic"
++	"time"
+ 	_ "unsafe"
+ 
+ 	xrayDispatcher "github.com/xtls/xray-core/app/dispatcher"
+@@ -49,9 +49,10 @@ func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{
+ 		return orig, nil
+ 	}
+ 	ld := &LimitDispatcher{
+-		inner:      orig,
+-		innerDisp:  inner,
+-		limitedIPs: make(map[string]map[string]int),
++		inner:        orig,
++		innerDisp:    inner,
++		limitedIPs:   make(map[string]map[string]int),
++		trackedConns: make(map[string]xrayConnRef),
+ 	}
+ 	globalLimitDispatcher.Store(ld)
+ 	nlog.Core().Debug("xray: limit dispatcher installed")
+@@ -70,26 +71,41 @@ type LimitDispatcher struct {
+ 	innerDisp routing.Dispatcher // same object, typed as Dispatcher
+ 
+ 	// limitedUsers: users with device limit > 0, protected by mu.
+-	// Needs deterministic IP ordering for kick decisions.
+-	mu           sync.RWMutex
+-	limitedIPs   map[string]map[string]int // email → sourceIP → refcount
+-	deviceLimits map[string]int            // email → max devices
+-	emailToUID   map[string]int            // email → panel user ID
++	// Needs deterministic credential ordering for admission decisions.
++	mu             sync.RWMutex
++	limitedIPs     map[string]map[string]int // email → device credential → refcount
++	deviceLimits   map[string]int            // email → max devices
++	emailToUID     map[string]int            // email → panel user ID
++	emailToDevice  map[string]string         // email → auth credential/device ID
++	trackedConnSeq atomic.Int64
++	trackedConns   map[string]xrayConnRef // connID → close metadata for global whitelist pruning
++
++	// Global device state pushed by the panel. When fresh and present for a
++	// user, this is authoritative across every node: a new auth credential must be
++	// in the panel-selected allowlist, not merely fit inside this node's local set.
++	globalDevices    map[int]map[string]bool // userID → auth credential → allowed
++	globalLastUpdate time.Time
+ 
+ 	// unlimitedIPs: users without device limit — sync.Map for lock-free access.
+-	// Each entry is *ipCounter{ips sync.Map}.
+-	unlimitedIPs sync.Map // email → *ipCounter
++	// Each entry is *deviceMapCounter{ips sync.Map}.
++	unlimitedIPs sync.Map // email → *deviceMapCounter
+ 
+ 	connCount atomic.Int64 // total active connections tracked by dispatcher
+ }
+ 
+-// ipCounter tracks IPs for unlimited users without any lock.
+-type ipCounter struct {
+-	ips sync.Map // sourceIP → *atomic.Int64 (refcount)
++type xrayConnRef struct {
++	uid      int
++	deviceID string
++	close    func()
+ }
+ 
+-// aliveIPs returns a snapshot of distinct IPs.
+-func (ic *ipCounter) aliveIPs() map[string]bool {
++// deviceMapCounter tracks device credentials for unlimited users without any lock.
++type deviceMapCounter struct {
++	ips sync.Map // device credential → *atomic.Int64 (refcount)
++}
++
++// aliveDevices returns a snapshot of distinct alive device credentials.
++func (ic *deviceMapCounter) aliveDevices() map[string]bool {
+ 	result := make(map[string]bool)
+ 	ic.ips.Range(func(key, _ interface{}) bool {
+ 		if rv, ok := ic.ips.Load(key); ok && rv.(*atomic.Int64).Load() > 0 {
+@@ -103,7 +119,7 @@ func (ic *ipCounter) aliveIPs() map[string]bool {
+ // ─── routing.Dispatcher ──────────────────────────────────────────────────────
+ 
+ func (d *LimitDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*transport.Link, error) {
+-	email, sourceIP, isTCP, err := d.identifyAndCheck(ctx, dest)
++	email, deviceID, isTCP, err := d.identifyAndCheck(ctx, dest)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -111,65 +127,96 @@ func (d *LimitDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*
+ 	link, err := d.innerDisp.Dispatch(ctx, dest)
+ 	if err != nil {
+ 		if email != "" && isTCP {
+-			d.delConn(email, sourceIP)
++			d.delConn(email, deviceID)
+ 		}
+ 		return nil, err
+ 	}
+ 
+ 	if email != "" {
+-		d.trackLink(link, email, sourceIP, isTCP)
++		d.trackLink(link, email, deviceID, isTCP)
+ 	}
+ 	return link, nil
+ }
+ 
+ func (d *LimitDispatcher) DispatchLink(ctx context.Context, dest net.Destination, link *transport.Link) error {
+-	email, sourceIP, isTCP, err := d.identifyAndCheck(ctx, dest)
++	email, deviceID, isTCP, err := d.identifyAndCheck(ctx, dest)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
++	var cleanup func()
+ 	if email != "" {
+-		d.trackLink(link, email, sourceIP, isTCP)
++		cleanup = d.trackLink(link, email, deviceID, isTCP)
+ 	}
+-	return d.innerDisp.DispatchLink(ctx, dest, link)
++	err = d.innerDisp.DispatchLink(ctx, dest, link)
++	if err != nil && cleanup != nil {
++		cleanup()
++	}
++	return err
+ }
+ 
+ // identifyAndCheck extracts user identity from the session context, enforces
+-// device limits, and returns the user's email, source IP, and TCP flag.
++// device limits, and returns the user's email, authenticated credential/device
++// ID, and TCP flag.
+ // Returns a non-nil error only when the connection should be rejected.
+-func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destination) (email, sourceIP string, isTCP bool, err error) {
++func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destination) (email, deviceID string, isTCP bool, err error) {
+ 	si := session.InboundFromContext(ctx)
+ 	if si == nil || si.User == nil || len(si.User.Email) == 0 {
+ 		return "", "", false, nil
+ 	}
+ 	email = si.User.Email
+-	sourceIP = si.Source.Address.IP().String()
+ 	isTCP = dest.Network == net.Network_TCP
+ 
+-	if d.checkDeviceLimit(email, sourceIP, isTCP) {
+-		nlog.Core().Debug("xray: device limit exceeded", "email", email, "ip", sourceIP)
++	// Strict global device limiting must distinguish different client devices
++	// using the same account credential. Use the client source IP as the device
++	// identifier; this matches the panel's reported device snapshot.
++	deviceID = si.Source.Address.IP().String()
++	if deviceID == "" {
++		deviceID = email
++	}
++
++	if d.checkDeviceLimit(email, deviceID, isTCP) {
++		nlog.Core().Debug("xray: device limit exceeded", "email", email, "device", deviceID, "ip", si.Source.Address.IP().String())
+ 		return "", "", false, errors.New("device limit exceeded for " + email)
+ 	}
+-	return email, sourceIP, isTCP, nil
++	return email, deviceID, isTCP, nil
+ }
+ 
+ // trackLink records connection lifecycle without mutating xray-core owned
+ // transport primitives. This keeps mux/XUDP compatible while still allowing
+ // the dispatcher to release device-limit state when the link closes.
+-func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) {
++func (d *LimitDispatcher) trackLink(link *transport.Link, email, deviceID string, isTCP bool) func() {
+ 	d.connCount.Add(1)
++	connID := "xray-" + formatInt36(d.trackedConnSeq.Add(1))
++	uid := 0
++	d.mu.RLock()
++	uid = d.emailToUID[email]
++	d.mu.RUnlock()
+ 
+ 	onClose := func() {
+ 		if isTCP {
+-			d.delConn(email, sourceIP)
++			d.delConn(email, deviceID)
+ 		}
++		d.mu.Lock()
++		delete(d.trackedConns, connID)
++		d.mu.Unlock()
+ 		d.connCount.Add(-1)
+ 	}
+ 
+-	link.Writer = &closeTrackingWriter{
++	cw := &closeTrackingWriter{
+ 		Writer:  link.Writer,
+ 		onClose: onClose,
+ 	}
++
++	d.mu.Lock()
++	if d.trackedConns == nil {
++		d.trackedConns = make(map[string]xrayConnRef)
++	}
++	d.trackedConns[connID] = xrayConnRef{uid: uid, deviceID: deviceID, close: func() { _ = cw.Close() }}
++	d.mu.Unlock()
++
++	link.Writer = cw
++	return func() { _ = cw.Close() }
+ }
+ 
+ // ─── features.Feature (delegated) ───────────────────────────────────────────
+@@ -192,20 +239,69 @@ func (d *LimitDispatcher) Close() error {
+ 
+ // ─── Limit management (called by Xray kernel) ──────────────────────────────
+ 
+-func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits, _ map[string]int) {
++func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits map[string]int, emailToDevice map[string]string) {
+ 	d.mu.Lock()
+ 	d.emailToUID = emailToUID
+ 	d.deviceLimits = deviceLimits
++	d.emailToDevice = make(map[string]string, len(emailToDevice))
++	for email, deviceID := range emailToDevice {
++		d.emailToDevice[email] = deviceID
++	}
++	d.mu.Unlock()
++}
++
++// UpdateGlobalDevices installs the panel-aggregated global device allowlist.
++// xray previously enforced device_limit only from this node's local IP set,
++// which let every newly added node admit one more device. Keeping this state in
++// the dispatcher makes the limit global across all nodes.
++func (d *LimitDispatcher) UpdateGlobalDevices(users map[int][]string) {
++	d.mu.Lock()
++	d.globalDevices = make(map[int]map[string]bool, len(users))
++	for uid, devices := range users {
++		m := make(map[string]bool, len(devices))
++		for _, device := range devices {
++			m[device] = true
++		}
++		d.globalDevices[uid] = m
++	}
++	d.globalLastUpdate = time.Now()
++	toClose := make([]func(), 0)
++	for _, ref := range d.trackedConns {
++		allowed, tracked := d.globalDevices[ref.uid]
++		if tracked && !allowed[ref.deviceID] && ref.close != nil {
++			toClose = append(toClose, ref.close)
++		}
++	}
++	d.mu.Unlock()
++
++	for _, closeConn := range toClose {
++		closeConn()
++	}
++	if len(toClose) > 0 {
++		nlog.Core().Info("xray: closed connections outside global device whitelist", "connections", len(toClose))
++	}
++
++	nlog.Core().Debug("xray: global device state updated", "users", len(users))
++}
++
++// ClearGlobalDevices drops the panel allowlist, causing the dispatcher to fall
++// back to local-only enforcement until REST/WS resync supplies a fresh snapshot.
++func (d *LimitDispatcher) ClearGlobalDevices() {
++	d.mu.Lock()
++	d.globalDevices = nil
++	d.globalLastUpdate = time.Time{}
+ 	d.mu.Unlock()
+ 
++	nlog.Core().Debug("xray: global device state cleared")
+ }
+ 
+ func (d *LimitDispatcher) ResetConns() {
+ 	d.mu.Lock()
+ 	d.limitedIPs = make(map[string]map[string]int)
++	d.trackedConns = make(map[string]xrayConnRef)
+ 	d.mu.Unlock()
+ 
+-	// Clear unlimited IPs
++	// Clear unlimited credential counters
+ 	d.unlimitedIPs.Range(func(key, _ interface{}) bool {
+ 		d.unlimitedIPs.Delete(key)
+ 		return true
+@@ -214,7 +310,7 @@ func (d *LimitDispatcher) ResetConns() {
+ 	d.connCount.Store(0)
+ }
+ 
+-// GetConnectionState returns dispatcher-tracked alive IPs and connection count.
++// GetConnectionState returns dispatcher-tracked alive device credentials and connection count.
+ // Traffic bytes are intentionally left to xray's built-in stats pipeline.
+ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool, connCount int) {
+ 	d.mu.RLock()
+@@ -224,31 +320,31 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
+ 
+ 	aliveIPs = make(map[int]map[string]bool)
+ 
+-	// Collect IPs from limited users (under RLock snapshot).
++	// Collect device credentials from limited users (under RLock snapshot).
+ 	for email, ipsMap := range limitedIPs {
+ 		uid := emailToUID[email]
+ 		if uid == 0 {
+ 			continue
+ 		}
+-		ipSet := make(map[string]bool, len(ipsMap))
+-		for ip := range ipsMap {
+-			ipSet[ip] = true
++		deviceSet := make(map[string]bool, len(ipsMap))
++		for device := range ipsMap {
++			deviceSet[device] = true
+ 		}
+-		if len(ipSet) > 0 {
+-			aliveIPs[uid] = ipSet
++		if len(deviceSet) > 0 {
++			aliveIPs[uid] = deviceSet
+ 		}
+ 	}
+ 
+-	// Collect IPs from unlimited users (lock-free).
++	// Collect device credentials from unlimited users (lock-free).
+ 	d.unlimitedIPs.Range(func(key, value interface{}) bool {
+ 		email := key.(string)
+ 		uid := emailToUID[email]
+ 		if uid == 0 {
+ 			return true
+ 		}
+-		ic := value.(*ipCounter)
+-		if ips := ic.aliveIPs(); len(ips) > 0 {
+-			// Merge with limited IPs if any
++		ic := value.(*deviceMapCounter)
++		if ips := ic.aliveDevices(); len(ips) > 0 {
++			// Merge with limited credentials if any.
+ 			if existing, ok := aliveIPs[uid]; ok {
+ 				for ip := range ips {
+ 					existing[ip] = true
+@@ -268,20 +364,23 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
+ 
+ // checkDeviceLimit enforces per-user device limits.
+ // Fast path: unlimited users use lock-free sync.Map.
+-// Slow path: limited users use RWMutex with deterministic IP ordering.
+-func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) bool {
++// Slow path: limited users use RWMutex with deterministic credential ordering.
++func (d *LimitDispatcher) checkDeviceLimit(email, deviceID string, isTCP bool) bool {
+ 	d.mu.RLock()
+ 	limit, hasLimit := d.deviceLimits[email]
++	uid := d.emailToUID[email]
++	globalFresh := !d.globalLastUpdate.IsZero() && time.Since(d.globalLastUpdate) <= 60*time.Second
++	globalDevices, hasGlobal := d.globalDevices[uid]
+ 	d.mu.RUnlock()
+ 
+ 	// Fast path: no device limit — use lock-free sync.Map.
+ 	if !hasLimit || limit <= 0 {
+ 		if isTCP {
+-			v, _ := d.unlimitedIPs.LoadOrStore(email, &ipCounter{})
+-			ic := v.(*ipCounter)
++			v, _ := d.unlimitedIPs.LoadOrStore(email, &deviceMapCounter{})
++			ic := v.(*deviceMapCounter)
+ 
+-			// Increment IP refcount atomically.
+-			rv, _ := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
++			// Increment device credential refcount atomically.
++			rv, _ := ic.ips.LoadOrStore(deviceID, &atomic.Int64{})
+ 			rv.(*atomic.Int64).Add(1)
+ 		}
+ 		return false
+@@ -290,11 +389,50 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) b
+ 	// Slow path: user has device limit — need deterministic ordering.
+ 	d.mu.RLock()
+ 	ips := d.limitedIPs[email]
+-	if ips != nil && ips[sourceIP] > 0 {
++	localCount := len(ips)
++	if globalFresh && hasGlobal {
++		// Authoritative global allowlist. If this credential already owns a global slot,
++		// admit it even on a newly added node. Any other credential must be rejected once
++		// the panel has selected at least one allowed device.
++		if globalDevices[deviceID] {
++			d.mu.RUnlock()
++			if isTCP {
++				d.mu.Lock()
++				if d.limitedIPs[email] == nil {
++					d.limitedIPs[email] = make(map[string]int)
++				}
++				d.limitedIPs[email][deviceID]++
++				d.mu.Unlock()
++			}
++			return false
++		}
++
++		// Empty fresh set is the bootstrap state: allow the first local credential so
++		// it can be reported to the panel. After any local/global slot exists, a
++		// credential outside the global allowlist is over limit.
++		if len(globalDevices) == 0 && localCount == 0 {
++			d.mu.RUnlock()
++			if isTCP {
++				d.mu.Lock()
++				if d.limitedIPs[email] == nil {
++					d.limitedIPs[email] = make(map[string]int)
++				}
++				d.limitedIPs[email][deviceID]++
++				d.mu.Unlock()
++			}
++			return false
++		}
++
++		d.mu.RUnlock()
++		nlog.Core().Debug("xray: global device whitelist rejecting", "email", email, "device", deviceID, "allowedDevices", len(globalDevices), "limit", limit)
++		return true
++	}
++
++	if ips != nil && ips[deviceID] > 0 {
+ 		d.mu.RUnlock()
+ 		if isTCP {
+ 			d.mu.Lock()
+-			d.limitedIPs[email][sourceIP]++
++			d.limitedIPs[email][deviceID]++
+ 			d.mu.Unlock()
+ 		}
+ 		return false
+@@ -307,7 +445,7 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) b
+ 			if d.limitedIPs[email] == nil {
+ 				d.limitedIPs[email] = make(map[string]int)
+ 			}
+-			d.limitedIPs[email][sourceIP]++
++			d.limitedIPs[email][deviceID]++
+ 			d.mu.Unlock()
+ 		}
+ 		return false
+@@ -325,48 +463,35 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) b
+ 		d.limitedIPs[email] = ips
+ 	}
+ 
+-	if ips[sourceIP] > 0 {
++	if ips[deviceID] > 0 {
+ 		if isTCP {
+-			ips[sourceIP]++
++			ips[deviceID]++
+ 		}
+ 		return false
+ 	}
+ 
+ 	if len(ips) < limit {
+ 		if isTCP {
+-			ips[sourceIP]++
++			ips[deviceID]++
+ 		}
+ 		return false
+ 	}
+ 
+-	// Over limit — deterministic: allow lowest IPs lexicographically.
+-	ipList := make([]string, 0, len(ips)+1)
+-	for ip := range ips {
+-		ipList = append(ipList, ip)
+-	}
+-	ipList = append(ipList, sourceIP)
+-	sort.Strings(ipList)
+-
+-	for i := 0; i < limit && i < len(ipList); i++ {
+-		if ipList[i] == sourceIP {
+-			if isTCP {
+-				ips[sourceIP]++
+-			}
+-			return false
+-		}
+-	}
++	// Over limit: keep already admitted credentials stable and reject any new credential.
++	// Do not replace/kick by lexical ordering; that allowed an extra device to
++	// slip in until the old connection drained, so limit=1 could show 2 online.
+ 	return true
+ }
+ 
+-// delConn decrements the IP refcount when a connection closes.
+-func (d *LimitDispatcher) delConn(email, sourceIP string) {
++// delConn decrements the device credential refcount when a connection closes.
++func (d *LimitDispatcher) delConn(email, deviceID string) {
+ 	// Check if this is an unlimited user first (lock-free).
+ 	if v, ok := d.unlimitedIPs.Load(email); ok {
+-		ic := v.(*ipCounter)
+-		if rv, ok := ic.ips.Load(sourceIP); ok {
++		ic := v.(*deviceMapCounter)
++		if rv, ok := ic.ips.Load(deviceID); ok {
+ 			counter := rv.(*atomic.Int64)
+ 			if counter.Add(-1) <= 0 {
+-				ic.ips.Delete(sourceIP)
++				ic.ips.Delete(deviceID)
+ 			}
+ 		}
+ 		return
+@@ -376,9 +501,9 @@ func (d *LimitDispatcher) delConn(email, sourceIP string) {
+ 	d.mu.Lock()
+ 	defer d.mu.Unlock()
+ 	if ips, ok := d.limitedIPs[email]; ok {
+-		ips[sourceIP]--
+-		if ips[sourceIP] <= 0 {
+-			delete(ips, sourceIP)
++		ips[deviceID]--
++		if ips[deviceID] <= 0 {
++			delete(ips, deviceID)
+ 		}
+ 		if len(ips) == 0 {
+ 			delete(d.limitedIPs, email)
+@@ -399,6 +524,21 @@ func (w *closeTrackingWriter) Close() error {
+ 	return common.Close(w.Writer)
+ }
+ 
++func formatInt36(n int64) string {
++	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
++	if n == 0 {
++		return "0"
++	}
++	var buf [13]byte
++	i := len(buf)
++	for n > 0 {
++		i--
++		buf[i] = digits[n%36]
++		n /= 36
++	}
++	return string(buf[i:])
++}
++
+ func (w *closeTrackingWriter) Interrupt() {
+ 	if w.closed.CompareAndSwap(false, true) {
+ 		w.onClose()
