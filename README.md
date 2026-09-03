@@ -20,14 +20,14 @@
 ## 当前发布版本
 
 ```text
-xboard-node v1.13-openclaw-globaldevices5 (built 2026-08-21T09:29:37Z)
+xboard-node globaldevices5-device-limit2 (built 2026-08-22T09:15:30Z)
 ```
 
 SHA256：
 
 ```text
-d73c744fe9c8f7ca4c47e7c9aec64e3cdfdf0278efb33b3379dce8125899c81a  xboard-node-global-device-linux-amd64
-668d0f0f0ef7b52bc30e4b8061a89f533c712cd52ff0291b08bfb267db52c8c6  xboard-node-global-device-linux-amd64.gz
+30bb575783e802f185aaa40759ead30e16d7b695e989686cb9270b2be12c260b  xboard-node-global-device-linux-amd64
+a97102e93ed3a7c6cf0fe136c28acc64c448bbd93a0b7e166fa74928641c2d3d  xboard-node-global-device-linux-amd64.gz
 ```
 
 ## 新节点安装方式
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/YOUR_REPO/main/scripts/in
 成功后应看到：
 
 ```text
-xboard-node v1.13-openclaw-globaldevices5
+xboard-node globaldevices5-device-limit2
 active
 ```
 
