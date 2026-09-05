@@ -1,0 +1,309 @@
+<?php
+
+namespace App\Services\Flyboard;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
+use Illuminate\Support\Str;
+
+class UpstreamSubscribeService
+{
+    private const URI_PREFIX_PATTERN = '/^(ss|ssr|vmess|vless|trojan|hysteria|hysteria2|hy2|tuic|socks|socks5|http|https):\/\//i';
+
+    public function isEnabled(): bool
+    {
+        return (bool) admin_setting('upstream_subscribe_enable', 0)
+            && trim((string) admin_setting('upstream_subscribe_url', '')) !== '';
+    }
+
+    public function mergeIntoResponse(Response $response, Request $request, mixed $user): Response
+    {
+        if (!$this->isEnabled()) {
+            return $response;
+        }
+
+        $localBody = (string) $response->getContent();
+        $localParsed = $this->parseSubscriptionBody($localBody);
+
+        if ($localParsed['format'] === 'structured') {
+            $response->headers->set('X-Flyboard-Upstream-Subscribe', 'skipped-structured-format');
+            return $response;
+        }
+
+        $upstream = $this->fetchForUser($request, $user);
+        if (!$upstream['ok']) {
+            $response->headers->set('X-Flyboard-Upstream-Subscribe', 'fetch-failed');
+            $response->headers->set('X-Flyboard-Upstream-Error', Str::limit($upstream['message'] ?? 'unknown', 120, ''));
+            return $response;
+        }
+
+        $upstreamParsed = $this->parseSubscriptionBody($upstream['body']);
+        if (!in_array($upstreamParsed['format'], ['base64', 'plain'], true)) {
+            $response->headers->set('X-Flyboard-Upstream-Subscribe', 'skipped-upstream-format');
+            return $response;
+        }
+
+        $localLines = $this->extractUriLines($localParsed['decoded']);
+        $upstreamLines = $this->extractUriLines($upstreamParsed['decoded']);
+        $mergedLines = $this->mergeLines($localLines, $upstreamLines);
+
+        if (empty($mergedLines)) {
+            $response->headers->set('X-Flyboard-Upstream-Subscribe', 'skipped-empty');
+            return $response;
+        }
+
+        $merged = implode("\r\n", $mergedLines) . "\r\n";
+        $response->setContent($localParsed['format'] === 'base64' ? base64_encode($merged) : $merged);
+        $response->headers->set('content-type', 'text/plain');
+        $response->headers->set('X-Flyboard-Upstream-Subscribe', 'merged');
+        $response->headers->set('X-Flyboard-Upstream-Count', (string) count($upstreamLines));
+
+        return $response;
+    }
+
+    public function preview(Request $request, mixed $user = null): array
+    {
+        $result = $this->fetchForUser($request, $user);
+        if (!$result['ok']) {
+            return $result;
+        }
+
+        $parsed = $this->parseSubscriptionBody($result['body']);
+        $lines = $this->extractUriLines($parsed['decoded']);
+
+        return array_merge($result, [
+            'format' => $parsed['format'],
+            'uri_count' => count($lines),
+            'preview' => array_slice($lines, 0, 20),
+        ]);
+    }
+
+    public function fetchForUser(Request $request, mixed $user = null): array
+    {
+        $url = $this->buildUrl($request, $user);
+        $validation = $this->validateUrl($url);
+        if ($validation !== true) {
+            return ['ok' => false, 'message' => $validation];
+        }
+
+        $timeout = max(1, min((int) admin_setting('upstream_subscribe_timeout', 10), 30));
+        $maxBytes = max(1024, min((int) admin_setting('upstream_subscribe_max_bytes', 524288), 1048576));
+        $userAgent = trim((string) admin_setting('upstream_subscribe_user_agent', ''));
+
+        try {
+            $fetched = $this->fetchUrlWithStream(
+                $url,
+                $timeout,
+                $userAgent !== '' ? $userAgent : ($request->userAgent() ?: 'Flyboard-UpstreamSubscribe/1.0')
+            );
+            if (isset($fetched['error'])) {
+                return ['ok' => false, 'message' => '上游请求失败：' . $fetched['error']];
+            }
+
+            $status = (int) ($fetched['status'] ?? 0);
+            $body = (string) ($fetched['body'] ?? '');
+            if ($status < 200 || $status >= 300) {
+                return ['ok' => false, 'message' => '上游返回 HTTP ' . $status, 'status' => $status];
+            }
+            if ($body === '') {
+                return ['ok' => false, 'message' => '上游订阅内容为空'];
+            }
+            if (strlen($body) > $maxBytes) {
+                return ['ok' => false, 'message' => '上游订阅超过大小限制'];
+            }
+
+            return [
+                'ok' => true,
+                'message' => 'ok',
+                'url' => $this->maskUrl($url),
+                'status' => $status,
+                'bytes' => strlen($body),
+                'content_type' => $fetched['content_type'] ?? null,
+                'body' => $body,
+            ];
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'message' => '上游处理失败：' . $e->getMessage()];
+        }
+    }
+
+    private function fetchUrlWithStream(string $url, int $timeout, string $userAgent): array
+    {
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'header' => implode("\r\n", [
+                    'Accept: text/plain, application/octet-stream, */*',
+                    'User-Agent: ' . $userAgent,
+                ]),
+                'timeout' => $timeout,
+                'ignore_errors' => true,
+                'follow_location' => 1,
+                'max_redirects' => 3,
+            ],
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+                'allow_self_signed' => false,
+            ],
+        ]);
+
+        $body = @file_get_contents($url, false, $context);
+        if ($body === false) {
+            $error = error_get_last();
+            return ['error' => $error['message'] ?? '无法读取上游订阅'];
+        }
+
+        $status = 0;
+        $contentType = null;
+        foreach (($http_response_header ?? []) as $headerLine) {
+            if (preg_match('/^HTTP\/\S+\s+(\d{3})\b/', $headerLine, $matches)) {
+                $status = (int) $matches[1];
+            }
+            if (stripos($headerLine, 'content-type:') === 0) {
+                $contentType = trim(substr($headerLine, strlen('content-type:')));
+            }
+        }
+
+        return [
+            'status' => $status,
+            'content_type' => $contentType,
+            'body' => $body,
+        ];
+    }
+
+    private function buildUrl(Request $request, mixed $user = null): string
+    {
+        $url = trim((string) admin_setting('upstream_subscribe_url', ''));
+        $replacements = [
+            '{token}' => (string) data_get($user, 'token', $request->route('token', '')),
+            '{user_id}' => (string) data_get($user, 'id', ''),
+            '{email}' => rawurlencode((string) data_get($user, 'email', '')),
+            '{flag}' => rawurlencode((string) ($request->input('flag') ?? $request->header('User-Agent', ''))),
+        ];
+
+        return strtr($url, $replacements);
+    }
+
+    private function validateUrl(string $url): true|string
+    {
+        if ($url === '') {
+            return '未配置上游订阅 URL';
+        }
+
+        $parts = parse_url($url);
+        if (!$parts || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true) || empty($parts['host'])) {
+            return '上游订阅 URL 必须是 http(s) 地址';
+        }
+
+        $host = $parts['host'];
+        $ips = filter_var($host, FILTER_VALIDATE_IP) ? [$host] : (gethostbynamel($host) ?: []);
+        if (empty($ips)) {
+            return '上游订阅域名无法解析';
+        }
+
+        foreach ($ips as $ip) {
+            if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                return '上游订阅不能指向内网或保留地址';
+            }
+        }
+
+        return true;
+    }
+
+    private function parseSubscriptionBody(string $body): array
+    {
+        $trimmed = trim($body);
+        if ($trimmed === '') {
+            return ['format' => 'empty', 'decoded' => ''];
+        }
+
+        if ($this->looksStructured($trimmed)) {
+            return ['format' => 'structured', 'decoded' => $body];
+        }
+
+        $decoded = base64_decode($this->normalizeBase64($trimmed), true);
+        if (is_string($decoded) && $decoded !== '' && $this->hasUriLine($decoded)) {
+            return ['format' => 'base64', 'decoded' => $decoded];
+        }
+
+        if ($this->hasUriLine($body)) {
+            return ['format' => 'plain', 'decoded' => $body];
+        }
+
+        return ['format' => 'unknown', 'decoded' => $body];
+    }
+
+    private function looksStructured(string $body): bool
+    {
+        $head = ltrim($body);
+        return str_starts_with($head, '{')
+            || str_starts_with($head, '[')
+            || preg_match('/^(proxies|proxy-groups|rules|mixed-port|port|dns|outbounds|inbounds):/mi', $head);
+    }
+
+    private function normalizeBase64(string $body): string
+    {
+        $clean = preg_replace('/\s+/', '', $body) ?? '';
+        $clean = strtr($clean, '-_', '+/');
+        $pad = strlen($clean) % 4;
+        return $pad ? $clean . str_repeat('=', 4 - $pad) : $clean;
+    }
+
+    private function hasUriLine(string $body): bool
+    {
+        foreach (preg_split('/\r\n|\r|\n/', $body) ?: [] as $line) {
+            if (preg_match(self::URI_PREFIX_PATTERN, trim($line))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function extractUriLines(string $body): array
+    {
+        return collect(preg_split('/\r\n|\r|\n/', $body) ?: [])
+            ->map(fn($line) => trim((string) $line))
+            ->filter(fn($line) => $line !== '' && preg_match(self::URI_PREFIX_PATTERN, $line))
+            ->values()
+            ->all();
+    }
+
+    private function mergeLines(array $localLines, array $upstreamLines): array
+    {
+        $mode = admin_setting('upstream_subscribe_merge_mode', 'append');
+        $lines = match ($mode) {
+            'prepend' => array_merge($upstreamLines, $localLines),
+            'replace' => $upstreamLines,
+            default => array_merge($localLines, $upstreamLines),
+        };
+
+        return array_values(array_unique($lines));
+    }
+
+    private function maskUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        if (!$parts || empty($parts['query'])) {
+            return $url;
+        }
+
+        parse_str($parts['query'], $query);
+        foreach (['token', 'key', 'access_token', 'password', 'passwd'] as $key) {
+            if (isset($query[$key])) {
+                $query[$key] = '***';
+            }
+        }
+
+        $masked = ($parts['scheme'] ?? 'https') . '://' . ($parts['host'] ?? '');
+        if (isset($parts['port'])) {
+            $masked .= ':' . $parts['port'];
+        }
+        $masked .= $parts['path'] ?? '';
+        $masked .= '?' . http_build_query($query);
+        if (isset($parts['fragment'])) {
+            $masked .= '#' . $parts['fragment'];
+        }
+
+        return $masked;
+    }
+}

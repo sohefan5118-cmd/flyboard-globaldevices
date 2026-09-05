@@ -1,0 +1,420 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\User;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redis;
+
+class DeviceStateService
+{
+    private const PREFIX = 'user_devices:';
+    private const REPORTED_PREFIX = 'user_reported_devices:';
+    private const TTL = 300;                     // device state ttl
+    private const DB_THROTTLE = 10;             // update db throttle
+
+    /**
+     * 移除 Redis key 的前缀
+     */
+    private function removeRedisPrefix(string $key): string
+    {
+        $prefix = config('database.redis.options.prefix', '');
+        return $prefix ? substr($key, strlen($prefix)) : $key;
+    }
+
+    /**
+     * 批量设置设备
+     * 用于 HTTP /alive 和 WebSocket report.devices
+     */
+    public function setDevices(int $userId, int $nodeId, array $ips): void
+    {
+        $lockKey = "device:set_lock:{$userId}";
+        $locked = false;
+
+        try {
+            $locked = Redis::set($lockKey, (string) $nodeId, 'NX', 'EX', 8) === true;
+            if (!$locked) {
+                Log::debug('[DeviceLimit] skipped concurrent device update', [
+                    'user_id' => $userId,
+                    'node_id' => $nodeId,
+                ]);
+                return;
+            }
+
+            $key = self::PREFIX . $userId;
+            $timestamp = time();
+
+            $this->removeNodeDevices($nodeId, $userId);
+
+            // Normalize: strip port suffix and deduplicate, then strictly apply device_limit.
+            $reportedIps = array_values(array_unique(array_map([self::class, 'normalizeIP'], $ips)));
+            // Capture already-allowed devices before removing this node's
+            // previous fields. This makes the limit first-come-first-served:
+            // if panel limit is 1 and the first device is already allowed,
+            // a later second device cannot replace it just because it appears
+            // in a newer node report.
+            $preferredAllowedIps = $this->getAllowedDevices($userId);
+
+            $this->removeNodeReportedDevices($nodeId, $userId);
+            if (!empty($reportedIps)) {
+                $reportedFields = [];
+                foreach ($reportedIps as $ip) {
+                    $reportedFields["{$nodeId}:{$ip}"] = $timestamp;
+                }
+                Redis::hMset(self::REPORTED_PREFIX . $userId, $reportedFields);
+                Redis::expire(self::REPORTED_PREFIX . $userId, self::TTL);
+            }
+            $ips = $this->limitDevices($userId, $reportedIps, null, $preferredAllowedIps);
+
+            if (!empty($ips)) {
+                $fields = [];
+                foreach ($ips as $ip) {
+                    $fields["{$nodeId}:{$ip}"] = $timestamp;
+                }
+                Redis::hMset($key, $fields);
+                Redis::expire($key, self::TTL);
+            }
+
+            // xboard-node v1.13 mostly enforces device_limit when a new connection
+            // is admitted. sync.devices updates alone do not actively close already
+            // established excess connections. If this node's report had to be
+            // trimmed, force a hot remove/add on this node so existing sessions are
+            // disconnected and reconnects re-enter the node-side gate.
+            if (count($reportedIps) > count($ips)) {
+                Log::info('[DeviceLimit] trimmed reported device IPs', [
+                    'user_id' => $userId,
+                    'node_id' => $nodeId,
+                    'reported_ips' => $reportedIps,
+                    'allowed_ips' => $ips,
+                ]);
+                $this->forceUserReconnectOnAllNodes($userId, $nodeId, count($reportedIps), count($ips));
+            }
+
+            $this->notifyUpdate($userId);
+        } finally {
+            if ($locked) {
+                Redis::del($lockKey);
+            }
+        }
+    }
+
+    /**
+     * 获取某节点的所有设备数据
+     * 返回: {userId: [ip1, ip2, ...], ...}
+     */
+    public function getNodeDevices(int $nodeId): array
+    {
+        $keys = Redis::keys(self::PREFIX . '*');
+        $prefix = "{$nodeId}:";
+        $result = [];
+        foreach ($keys as $key) {
+            $actualKey = $this->removeRedisPrefix($key);
+            $uid = (int) substr($actualKey, strlen(self::PREFIX));
+            $data = Redis::hgetall($actualKey);
+            foreach ($data as $field => $timestamp) {
+                if (str_starts_with($field, $prefix)) {
+                    $ip = substr($field, strlen($prefix));
+                    $result[$uid][] = $ip;
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * 删除某节点某用户的设备
+     */
+    public function removeNodeDevices(int $nodeId, int $userId): void
+    {
+        $key = self::PREFIX . $userId;
+        $prefix = "{$nodeId}:";
+
+        foreach (Redis::hkeys($key) as $field) {
+            if (str_starts_with($field, $prefix)) {
+                Redis::hdel($key, $field);
+            }
+        }
+    }
+
+    private function removeNodeReportedDevices(int $nodeId, int $userId): void
+    {
+        $key = self::REPORTED_PREFIX . $userId;
+        $prefix = "{$nodeId}:";
+        foreach (Redis::hkeys($key) as $field) {
+            if (str_starts_with($field, $prefix)) {
+                Redis::hdel($key, $field);
+            }
+        }
+    }
+
+    /**
+     * 清除节点所有设备数据（用于节点断开连接）
+     */
+    public function clearAllNodeDevices(int $nodeId): array
+    {
+        $oldDevices = $this->getNodeDevices($nodeId);
+        $prefix = "{$nodeId}:";
+
+        foreach ($oldDevices as $userId => $ips) {
+            $key = self::PREFIX . $userId;
+            foreach (Redis::hkeys($key) as $field) {
+                if (str_starts_with($field, $prefix)) {
+                    Redis::hdel($key, $field);
+                }
+            }
+            $this->removeNodeReportedDevices($nodeId, $userId);
+            $this->notifyUpdate($userId);
+        }
+
+        return array_keys($oldDevices);
+    }
+
+    /**
+     * get user device count (deduplicated by IP, filter expired data)
+     */
+    public function getDeviceCount(int $userId): int
+    {
+        $data = Redis::hgetall(self::PREFIX . $userId);
+        $now = time();
+        $ips = [];
+
+        foreach ($data as $field => $timestamp) {
+            if ($now - $timestamp <= self::TTL) {
+                $ips[] = substr($field, strpos($field, ':') + 1);
+            }
+        }
+
+        return count(array_unique($ips));
+    }
+
+    /**
+     * get user device count (for alivelist interface)
+     */
+    public function getAliveList(Collection $users): array
+    {
+        if ($users->isEmpty()) {
+            return [];
+        }
+
+        $result = [];
+        foreach ($users as $user) {
+            $count = $this->getDeviceCount($user->id);
+            $limit = (int) ($user->device_limit ?? 0);
+            if ($limit > 0) {
+                $count = min($count, $limit);
+            }
+            if ($count > 0) {
+                $result[$user->id] = $count;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * get devices of multiple users (for sync.devices, filter expired data)
+     */
+    public function getUsersDevices(array $userIds, array $limits = []): array
+    {
+        $result = [];
+        $now = time();
+        foreach ($userIds as $userId) {
+            $userId = (int) $userId;
+            $data = Redis::hgetall(self::PREFIX . $userId);
+            if (!empty($data)) {
+                $ips = [];
+                foreach ($data as $field => $timestamp) {
+                    if ($now - $timestamp <= self::TTL) {
+                        $ips[] = substr($field, strpos($field, ':') + 1);
+                    }
+                }
+                if (!empty($ips)) {
+                    $limit = array_key_exists($userId, $limits) ? (int) $limits[$userId] : null;
+                    $result[$userId] = $this->limitDevices($userId, array_values(array_unique($ips)), $limit);
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Enforce configured device_limit by keeping only the allowed devices.
+     * Existing allowed devices are preferred so the first online device remains stable;
+     * extra newly reported devices are not saved and will not be pushed back to nodes.
+     */
+    private function limitDevices(int $userId, array $ips, ?int $configuredLimit = null, ?array $preferredAllowedIps = null): array
+    {
+        $limit = $configuredLimit ?? (int) (User::query()->whereKey($userId)->value('device_limit') ?? 0);
+        if ($limit <= 0) {
+            return $ips;
+        }
+
+        // setDevices() removes this node's old records before calling here, so
+        // $existing contains devices currently allowed on other nodes. Count
+        // those first, then fill any remaining slots from this node's report.
+        $allowedGlobal = [];
+        foreach (($preferredAllowedIps ?? $this->getAllowedDevices($userId)) as $ip) {
+            if (!in_array($ip, $allowedGlobal, true)) {
+                $allowedGlobal[] = $ip;
+            }
+            if (count($allowedGlobal) >= $limit) {
+                break;
+            }
+        }
+
+        foreach ($ips as $ip) {
+            if (count($allowedGlobal) >= $limit) {
+                break;
+            }
+            if (!in_array($ip, $allowedGlobal, true)) {
+                $allowedGlobal[] = $ip;
+            }
+        }
+
+        // Save/push only the IPs from this node that are part of the global
+        // allowed set. If another node already uses all slots, this node gets
+        // an empty device list and its extra connections are kicked.
+        return array_values(array_filter($ips, fn ($ip) => in_array($ip, $allowedGlobal, true)));
+    }
+
+    /**
+     * Force a node to drop this user's current connections after over-limit
+     * device reports are trimmed. The immediate add keeps the user available
+     * while making stale excess sessions reconnect through the device gate.
+     */
+    private function forceNodeUserReconnect(int $userId, int $nodeId, int $reportedCount, int $allowedCount): void
+    {
+        $throttleKey = "device:force_reconnect:{$nodeId}:{$userId}";
+        if (!Redis::setnx($throttleKey, 1)) {
+            return;
+        }
+        Redis::expire($throttleKey, 20);
+
+        $user = User::query()->select(['id', 'uuid', 'speed_limit', 'device_limit'])->find($userId);
+        if (!$user) {
+            return;
+        }
+
+        try {
+            NodeSyncService::push($nodeId, 'sync.user.delta', [
+                'action' => 'remove',
+                'users' => [['id' => $user->id]],
+            ]);
+            NodeSyncService::push($nodeId, 'sync.user.delta', [
+                'action' => 'add',
+                'users' => [[
+                    'id' => $user->id,
+                    'uuid' => $user->uuid,
+                    'speed_limit' => $user->speed_limit,
+                    'device_limit' => $user->device_limit,
+                ]],
+            ]);
+            Log::info('[DeviceLimit] forced node user reconnect after trimming devices', [
+                'user_id' => $userId,
+                'node_id' => $nodeId,
+                'reported' => $reportedCount,
+                'allowed' => $allowedCount,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('[DeviceLimit] force node user reconnect failed', [
+                'user_id' => $userId,
+                'node_id' => $nodeId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * A device limit is global across nodes. Reconnecting only the node that
+     * reported the excess leaves an already-established session on another
+     * node alive, especially when each node reports one different IP.
+     */
+    private function forceUserReconnectOnAllNodes(int $userId, int $reportedNodeId, int $reportedCount, int $allowedCount): void
+    {
+        $user = User::query()->select(['id', 'uuid', 'group_id', 'speed_limit', 'device_limit'])->find($userId);
+        if (!$user) {
+            return;
+        }
+
+        $nodeIds = \App\Models\Server::query()
+            ->where('enabled', 1)
+            ->whereJsonContains('group_ids', (string) $user->group_id)
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn (int $id) => NodeSyncService::isNodeOnline($id))
+            ->values()
+            ->all();
+
+        foreach ($nodeIds as $nodeId) {
+            $this->forceNodeUserReconnect($userId, $nodeId, $reportedCount, $allowedCount);
+            Redis::sadd('device:push_pending_nodes', $nodeId);
+        }
+
+        Log::info('[DeviceLimit] broadcast reconnect to all online nodes', [
+            'user_id' => $userId,
+            'reported_node_id' => $reportedNodeId,
+            'node_ids' => $nodeIds,
+            'reported' => $reportedCount,
+            'allowed' => $allowedCount,
+        ]);
+    }
+
+    /**
+     * Return current non-expired allowed devices for a user, deduplicated by IP.
+     */
+    private function getAllowedDevices(int $userId): array
+    {
+        $data = Redis::hgetall(self::PREFIX . $userId);
+        $now = time();
+        $ips = [];
+
+        foreach ($data as $field => $timestamp) {
+            if ($now - $timestamp <= self::TTL) {
+                $ip = substr($field, strpos($field, ':') + 1);
+                if (!in_array($ip, $ips, true)) {
+                    $ips[] = $ip;
+                }
+            }
+        }
+
+        return $ips;
+    }
+
+    /**
+     * Strip port from IP address: "1.2.3.4:12345" → "1.2.3.4", "[::1]:443" → "::1"
+     */
+    private static function normalizeIP(string $ip): string
+    {
+        // [IPv6]:port
+        if (preg_match('/^\[(.+)\]:\d+$/', $ip, $m)) {
+            return $m[1];
+        }
+        // IPv4:port
+        if (preg_match('/^(\d+\.\d+\.\d+\.\d+):\d+$/', $ip, $m)) {
+            return $m[1];
+        }
+        return $ip;
+    }
+
+    /**
+     * notify update (throttle control)
+     */
+    public function notifyUpdate(int $userId): void
+    {
+        $dbThrottleKey = "device:db_throttle:{$userId}";
+
+        // if (Redis::setnx($dbThrottleKey, 1)) {
+        //     Redis::expire($dbThrottleKey, self::DB_THROTTLE);
+
+            User::query()
+                ->whereKey($userId)
+                ->update([
+                    'online_count' => $this->getDeviceCount($userId),
+                    'last_online_at' => now(),
+                ]);
+        // }
+    }
+}

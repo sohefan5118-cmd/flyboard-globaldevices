@@ -1,0 +1,13 @@
+Flyboard source snapshot
+Generated: 2026-09-05T06:56:56Z
+
+Included:
+- src/panel from /root/.openclaw/workspace/xboard-panel-src
+- src/node from /root/.openclaw/workspace/xboard-node-src
+- release/install artifacts already present in this repo
+
+Excluded from source snapshot:
+- .git directories
+- .env / .env.* real environment files
+- vendor / node_modules dependencies
+- local build outputs from node source; release binaries remain in dist/offline
