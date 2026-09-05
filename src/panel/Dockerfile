@@ -9,7 +9,8 @@ RUN install-php-extensions pcntl bcmath inotify \
 WORKDIR /www
 COPY .docker /
 COPY . /www
-RUN composer install --optimize-autoloader --no-cache --no-dev \
+RUN composer config --no-plugins audit.block-insecure false \
+&& composer install --optimize-autoloader --no-cache --no-dev \
 && php artisan storage:link \
 && cp /www/.env.example /www/.env \
 && chown -R www:www /www \
