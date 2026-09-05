@@ -42,11 +42,11 @@ git push -u origin main
 ## After push, node install command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sohefan5118/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
 ```
 
 Panel install command for a new panel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sohefan5118/flyboard-globaldevices/main/scripts/install-panel-machine-devices.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-panel-machine-devices.sh | bash
 ```

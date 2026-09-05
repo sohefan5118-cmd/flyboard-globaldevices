@@ -1,0 +1,77 @@
+diff --git a/app/Http/Controllers/V1/Client/ClientController.php b/app/Http/Controllers/V1/Client/ClientController.php
+index 903490f..0fc7a05 100644
+--- a/app/Http/Controllers/V1/Client/ClientController.php
++++ b/app/Http/Controllers/V1/Client/ClientController.php
+@@ -8,6 +8,7 @@ use App\Services\ServerService;
+ use App\Services\UserService;
+ use App\Utils\Helper;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\Auth;
+ 
+ class ClientController extends Controller
+ {
+@@ -44,7 +45,10 @@ class ClientController extends Controller
+         $version = preg_match('/\/v?(\d+(\.\d+){0,2})/', $flag, $matches) ? $matches[1] : null;
+         $supportHy2 = $version ? collect(self::SupportedHy2ClientVersions)
+                 ->contains(fn($minVersion, $client) => stripos($flag, $client) !== false && $this->versionCompare($version, $minVersion)) : true;
+-        $user = $request->user;
++        $user = $request->user() ?: Auth::user() ?: ($request->user ?? null);
++        if (!$user) {
++            return response('', 403, ['Content-Type' => 'text/plain']);
++        }
+         // account not expired and is not banned.
+         $userService = new UserService();
+         if ($userService->isAvailable($user)) {
+@@ -62,9 +66,12 @@ class ClientController extends Controller
+                 foreach (array_reverse(glob(app_path('Protocols') . '/*.php')) as $file) {
+                     $file = 'App\\Protocols\\' . basename($file, '.php');
+                     $class = new $file($user, $servers);
++                    if (!property_exists($class, 'flag') || empty($class->flag)) {
++                        continue;
++                    }
+                     $classFlags = explode(',', $class->flag);
+                     foreach ($classFlags as $classFlag) {
+-                        if (stripos($flag, $classFlag) !== false) {
++                        if ($classFlag !== '' && stripos($flag, $classFlag) !== false) {
+                             return $class->handle();
+                         }
+                     }
+diff --git a/app/Http/Middleware/Client.php b/app/Http/Middleware/Client.php
+index fd4086e..082a437 100755
+--- a/app/Http/Middleware/Client.php
++++ b/app/Http/Middleware/Client.php
+@@ -3,10 +3,9 @@
+ namespace App\Http\Middleware;
+ 
+ use App\Exceptions\ApiException;
+-use App\Utils\CacheKey;
+ use Closure;
+ use App\Models\User;
+-use Illuminate\Support\Facades\Cache;
++use Illuminate\Support\Facades\Auth;
+ 
+ class Client
+ {
+@@ -19,7 +18,7 @@ class Client
+      */
+     public function handle($request, Closure $next)
+     {
+-        $token = $request->input('token');
++        $token = $request->input('token', $request->route('token'));
+         if (empty($token)) {
+             throw new ApiException('token is null',403);
+         }
+@@ -27,9 +26,10 @@ class Client
+         if (!$user) {
+             throw new ApiException('token is error',403);
+         }
+-        $request->merge([
+-            'user' => $user
+-        ]);
++        
++        Auth::setUser($user);
++        $request->setUserResolver(fn () => $user);
++        $request->user = $user;
+         return $next($request);
+     }
+ }

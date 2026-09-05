@@ -1,0 +1,1177 @@
+diff --git a/app/Http/Controllers/V1/Client/ClientController.php b/app/Http/Controllers/V1/Client/ClientController.php
+index 903490f..b13a0b8 100644
+--- a/app/Http/Controllers/V1/Client/ClientController.php
++++ b/app/Http/Controllers/V1/Client/ClientController.php
+@@ -3,152 +3,205 @@
+ namespace App\Http\Controllers\V1\Client;
+ 
+ use App\Http\Controllers\Controller;
++use App\Models\Server;
+ use App\Protocols\General;
++use App\Services\Plugin\HookManager;
+ use App\Services\ServerService;
++use App\Services\Flyboard\SubscribeGuardService;
++use App\Services\Flyboard\UpstreamSubscribeService;
++use App\Services\Flyboard\NodeAuthAliasService;
+ use App\Services\UserService;
+ use App\Utils\Helper;
+ use Illuminate\Http\Request;
+ 
+ class ClientController extends Controller
+ {
+-
+-    // 支持hy2 的客户端版本列表
+-    const SupportedHy2ClientVersions = [
+-        'NekoBox' => '1.2.7',
+-        'sing-box' => '1.5.0',
+-        'stash' => '2.5.0',
+-        'Shadowrocket' => '1993',
+-        'ClashMetaForAndroid' => '2.9.0',
+-        'Nekoray' => '3.24',
+-        'verge' => '1.3.8',
+-        'ClashX Meta' => '1.3.5',
+-        'Hiddify' => '0.1.0',
+-        'loon' => '637',
+-        'v2rayng' => '1.9.5',
+-        'v2rayN' => '6.31',
+-        'surge' => '2398'
++    /**
++     * Protocol prefix mapping for server names
++     */
++    private const PROTOCOL_PREFIXES = [
++        'hysteria' => [
++            1 => '[Hy]',
++            2 => '[Hy2]'
++        ],
++        'vless' => '[vless]',
++        'shadowsocks' => '[ss]',
++        'vmess' => '[vmess]',
++        'trojan' => '[trojan]',
++        'tuic' => '[tuic]',
++        'socks' => '[socks]',
++        'anytls' => '[anytls]'
+     ];
+-    // allowed types
+-    const AllowedTypes = ['vmess', 'vless', 'trojan', 'hysteria', 'shadowsocks', 'hysteria2'];
++
+ 
+     public function subscribe(Request $request)
+     {
+-        // filter types
+-        $types = $request->input('types', 'all');
+-        $typesArr = $types === 'all' ? self::AllowedTypes : array_values(array_intersect(explode('|', str_replace(['|', '｜', ','], "|", $types)), self::AllowedTypes));
+-        // filter keyword
+-        $filterArr = mb_strlen($filter = $request->input('filter')) > 20 ? null : explode("|", str_replace(['|', '｜', ','], "|", $filter));
+-        $flag = strtolower($request->input('flag') ?? $request->header('User-Agent', ''));
+-        $ip = $request->input('ip', $request->ip());
+-        // get client version
+-        $version = preg_match('/\/v?(\d+(\.\d+){0,2})/', $flag, $matches) ? $matches[1] : null;
+-        $supportHy2 = $version ? collect(self::SupportedHy2ClientVersions)
+-                ->contains(fn($minVersion, $client) => stripos($flag, $client) !== false && $this->versionCompare($version, $minVersion)) : true;
+-        $user = $request->user;
+-        // account not expired and is not banned.
++        HookManager::call('client.subscribe.before');
++        $request->validate([
++            'types' => ['nullable', 'string'],
++            'filter' => ['nullable', 'string'],
++            'flag' => ['nullable', 'string'],
++        ]);
++
++        $user = $request->user();
+         $userService = new UserService();
+-        if ($userService->isAvailable($user)) {
+-            // get ip location
+-            $ip2region = new \Ip2Region();
+-            $region = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? ($ip2region->memorySearch($ip)['region'] ?? null) : null;
+-            // get available servers
++
++        if (!$userService->isAvailable($user)) {
++            HookManager::call('client.subscribe.unavailable');
++            return response('', 403, ['Content-Type' => 'text/plain']);
++        }
++
++        if (!(new SubscribeGuardService())->check($request, $user)) {
++            return response('Subscribe sharing detected.', 403, ['Content-Type' => 'text/plain']);
++        }
++
++        return $this->doSubscribe($request, $user);
++    }
++
++    public function doSubscribe(Request $request, $user, $servers = null)
++    {
++        if ($servers === null) {
+             $servers = ServerService::getAvailableServers($user);
+-            // filter servers
+-            $serversFiltered = $this->serverFilter($servers, $typesArr, $filterArr, $region, $supportHy2);
+-            $this->setSubscribeInfoToServers($serversFiltered, $user, count($servers) - count($serversFiltered));
+-            $servers = $serversFiltered;
+-            $this->addPrefixToServerName($servers);
+-            if ($flag) {
+-                foreach (array_reverse(glob(app_path('Protocols') . '/*.php')) as $file) {
+-                    $file = 'App\\Protocols\\' . basename($file, '.php');
+-                    $class = new $file($user, $servers);
+-                    $classFlags = explode(',', $class->flag);
+-                    foreach ($classFlags as $classFlag) {
+-                        if (stripos($flag, $classFlag) !== false) {
+-                            return $class->handle();
+-                        }
+-                    }
+-                }
+-            }
+-            $class = new General($user, $servers);
+-            return $class->handle();
++            $servers = HookManager::filter('client.subscribe.servers', $servers, $user, $request);
+         }
++
++        $clientInfo = $this->getClientInfo($request);
++
++        $requestedTypes = $this->parseRequestedTypes($request->input('types'));
++        $filterKeywords = $this->parseFilterKeywords($request->input('filter'));
++
++        $protocolClassName = app('protocols.manager')->matchProtocolClassName($clientInfo['flag'])
++            ?? General::class;
++
++        $serversFiltered = $this->filterServers(
++            servers: $servers,
++            allowedTypes: $requestedTypes,
++            filterKeywords: $filterKeywords
++        );
++
++        $this->setSubscribeInfoToServers($serversFiltered, $user, count($servers) - count($serversFiltered));
++        $serversFiltered = $this->addPrefixToServerName($serversFiltered);
++
++        // Instantiate the protocol class with filtered servers and client info.
++        // When subscribe guard is enabled, expose the same short-lived auth UUID
++        // to protocol builders that read $this->user['uuid'] directly.
++        $protocolUser = app(NodeAuthAliasService::class)->userForSubscribe($user);
++        $protocolInstance = app()->make($protocolClassName, [
++            'user' => $protocolUser,
++            'servers' => $serversFiltered,
++            'clientName' => $clientInfo['name'] ?? null,
++            'clientVersion' => $clientInfo['version'] ?? null,
++            'userAgent' => $clientInfo['flag'] ?? null
++        ]);
++
++        $response = $protocolInstance->handle();
++
++        return app(UpstreamSubscribeService::class)->mergeIntoResponse($response, $request, $user);
+     }
++
+     /**
+-     * Summary of serverFilter
+-     * @param mixed $typesArr
+-     * @param mixed $filterArr
+-     * @param mixed $region
+-     * @param mixed $supportHy2
+-     * @return array
++     * Parses the input string for requested server types.
+      */
+-    private function serverFilter($servers, $typesArr, $filterArr, $region, $supportHy2)
++    private function parseRequestedTypes(?string $typeInputString): array
+     {
+-        return collect($servers)->reject(function ($server) use ($typesArr, $filterArr, $region, $supportHy2) {
+-            if ($server['type'] == "hysteria" && $server['version'] == 2) {
+-                if(!in_array('hysteria2', $typesArr)){
+-                    return true;
+-                }elseif(false == $supportHy2){
+-                    return true;
+-                }
+-            }
++        if (blank($typeInputString) || $typeInputString === 'all') {
++            return Server::VALID_TYPES;
++        }
+ 
+-            if ($filterArr) {
+-                foreach ($filterArr as $filter) {
+-                    if (stripos($server['name'], $filter) !== false || in_array($filter, $server['tags'] ?? [])) {
+-                        return false;
+-                    }
+-                }
+-                return true;
++        $requested = collect(preg_split('/[|,｜]+/', $typeInputString))
++            ->map(fn($type) => trim($type))
++            ->filter() // Remove empty strings that might result from multiple delimiters
++            ->all();
++
++        return array_values(array_intersect($requested, Server::VALID_TYPES));
++    }
++
++    /**
++     * Parses the input string for filter keywords.
++     */
++    private function parseFilterKeywords(?string $filterInputString): ?array
++    {
++        if (blank($filterInputString) || mb_strlen($filterInputString) > 20) {
++            return null;
++        }
++
++        return collect(preg_split('/[|,｜]+/', $filterInputString))
++            ->map(fn($keyword) => trim($keyword))
++            ->filter() // Remove empty strings
++            ->all();
++    }
++
++    /**
++     * Filters servers based on allowed types and keywords.
++     */
++    private function filterServers(array $servers, array $allowedTypes, ?array $filterKeywords): array
++    {
++        return collect($servers)->filter(function ($server) use ($allowedTypes, $filterKeywords) {
++            // Condition 1: Server type must be in the list of allowed types
++            if ($allowedTypes && !in_array($server['type'], $allowedTypes)) {
++                return false; // Filter out (don't keep)
+             }
+ 
+-            if (strpos($region, '中国') !== false) {
+-                $excludes = $server['excludes'] ?? [];
+-                if (empty($excludes)) {
+-                    return false;
+-                }
+-                foreach ($excludes as $v) {
+-                    $excludeList = explode("|", str_replace(["｜", ",", " ", "，"], "|", $v));
+-                    foreach ($excludeList as $needle) {
+-                        if (stripos($region, $needle) !== false) {
+-                            return true;
+-                        }
+-                    }
++            // Condition 2: If filterKeywords are provided, at least one keyword must match
++            if (!empty($filterKeywords)) { // Check if $filterKeywords is not empty
++                $keywordMatch = collect($filterKeywords)->contains(function ($keyword) use ($server) {
++                    return stripos($server['name'], $keyword) !== false
++                        || in_array($keyword, $server['tags'] ?? []);
++                });
++                if (!$keywordMatch) {
++                    return false; // Filter out if no keywords match
+                 }
+             }
++            // Keep the server if its type is allowed AND (no filter keywords OR at least one keyword matched)
++            return true;
+         })->values()->all();
+     }
+-    /*
+-     * add prefix to server name
+-     */
+-    private function addPrefixToServerName(&$servers)
++
++    private function getClientInfo(Request $request): array
+     {
+-        // 线路名称增加协议类型
+-        if (admin_setting('show_protocol_to_server_enable')) {
+-            $typePrefixes = [
+-                'hysteria' => [1 => '[Hy]', 2 => '[Hy2]'],
+-                'vless' => '[vless]',
+-                'shadowsocks' => '[ss]',
+-                'vmess' => '[vmess]',
+-                'trojan' => '[trojan]',
+-            ];
+-            $servers = collect($servers)->map(function ($server) use ($typePrefixes) {
+-                if (isset($typePrefixes[$server['type']])) {
+-                    $prefix = is_array($typePrefixes[$server['type']]) ? $typePrefixes[$server['type']][$server['version']] : $typePrefixes[$server['type']];
+-                    $server['name'] = $prefix . $server['name'];
++        $flag = strtolower($request->input('flag') ?? $request->header('User-Agent', ''));
++
++        $clientName = null;
++        $clientVersion = null;
++
++        if (preg_match('/([a-zA-Z0-9\-_]+)[\/\s]+(v?[0-9]+(?:\.[0-9]+){0,2})/', $flag, $matches)) {
++            $potentialName = strtolower($matches[1]);
++            $clientVersion = preg_replace('/^v/', '', $matches[2]);
++
++            if (in_array($potentialName, app('protocols.flags'))) {
++                $clientName = $potentialName;
++            }
++        }
++
++        if (!$clientName) {
++            $flags = collect(app('protocols.flags'))->sortByDesc(fn($f) => strlen($f))->values()->all();
++            foreach ($flags as $name) {
++                if (stripos($flag, $name) !== false) {
++                    $clientName = $name;
++                    if (!$clientVersion) {
++                        $pattern = '/' . preg_quote($name, '/') . '[\/\s]+(v?[0-9]+(?:\.[0-9]+){0,2})/i';
++                        if (preg_match($pattern, $flag, $vMatches)) {
++                            $clientVersion = preg_replace('/^v/', '', $vMatches[1]);
++                        }
++                    }
++                    break;
+                 }
+-                return $server;
+-            })->toArray();
++            }
++        }
++
++        if (!$clientVersion) {
++            if (preg_match('/\/v?(\d+(?:\.\d+){0,2})/', $flag, $matches)) {
++                $clientVersion = $matches[1];
++            }
+         }
++
++        return [
++            'flag' => $flag,
++            'name' => $clientName,
++            'version' => $clientVersion
++        ];
+     }
+ 
+-    /**
+-     * Summary of setSubscribeInfoToServers
+-     * @param mixed $servers
+-     * @param mixed $user
+-     * @param mixed $rejectServerCount
+-     * @return void
+-     */
+     private function setSubscribeInfoToServers(&$servers, $user, $rejectServerCount = 0)
+     {
+         if (!isset($servers[0]))
+@@ -163,7 +216,7 @@ class ClientController extends Controller
+         $useTraffic = $user['u'] + $user['d'];
+         $totalTraffic = $user['transfer_enable'];
+         $remainingTraffic = Helper::trafficConvert($totalTraffic - $useTraffic);
+-        $expiredDate = $user['expired_at'] ? date('Y-m-d', $user['expired_at']) : '长期有效';
++        $expiredDate = $user['expired_at'] ? date('Y-m-d', $user['expired_at']) : __('长期有效');
+         $userService = new UserService();
+         $resetDay = $userService->getResetDay($user);
+         array_unshift($servers, array_merge($servers[0], [
+@@ -179,33 +232,28 @@ class ClientController extends Controller
+         ]));
+     }
+ 
+-
+-    /**
+-     * 判断版本号
+-     */
+-
+-    function versionCompare($version1, $version2)
++    private function addPrefixToServerName(array $servers): array
+     {
+-        if (!preg_match('/^\d+(\.\d+){0,2}/', $version1) || !preg_match('/^\d+(\.\d+){0,2}/', $version2)) {
+-            return false;
++        if (!admin_setting('show_protocol_to_server_enable', false)) {
++            return $servers;
+         }
+-        $v1Parts = explode('.', $version1);
+-        $v2Parts = explode('.', $version2);
+-
+-        $maxParts = max(count($v1Parts), count($v2Parts));
+-
+-        for ($i = 0; $i < $maxParts; $i++) {
+-            $part1 = isset($v1Parts[$i]) ? (int) $v1Parts[$i] : 0;
+-            $part2 = isset($v2Parts[$i]) ? (int) $v2Parts[$i] : 0;
++        return collect($servers)
++            ->map(function (array $server): array {
++                $server['name'] = $this->getPrefixedServerName($server);
++                return $server;
++            })
++            ->all();
++    }
+ 
+-            if ($part1 < $part2) {
+-                return false;
+-            } elseif ($part1 > $part2) {
+-                return true;
+-            }
++    private function getPrefixedServerName(array $server): string
++    {
++        $type = $server['type'] ?? '';
++        if (!isset(self::PROTOCOL_PREFIXES[$type])) {
++            return $server['name'] ?? '';
+         }
+-
+-        // 版本号相等
+-        return true;
++        $prefix = is_array(self::PROTOCOL_PREFIXES[$type])
++            ? self::PROTOCOL_PREFIXES[$type][$server['protocol_settings']['version'] ?? 1] ?? ''
++            : self::PROTOCOL_PREFIXES[$type];
++        return $prefix . ($server['name'] ?? '');
+     }
+ }
+diff --git a/app/Services/ServerService.php b/app/Services/ServerService.php
+old mode 100644
+new mode 100755
+index 60bcefa..d89d441
+--- a/app/Services/ServerService.php
++++ b/app/Services/ServerService.php
+@@ -2,202 +2,100 @@
+ 
+ namespace App\Services;
+ 
+-use App\Models\ServerHysteria;
+-use App\Models\ServerLog;
++use App\Models\Server;
++use App\Models\ServerMachine;
+ use App\Models\ServerRoute;
+-use App\Models\ServerShadowsocks;
+-use App\Models\ServerVless;
+ use App\Models\User;
+-use App\Models\ServerVmess;
+-use App\Models\ServerTrojan;
++use App\Services\Plugin\HookManager;
++use App\Services\Flyboard\NodeAuthAliasService;
+ use App\Utils\CacheKey;
+ use App\Utils\Helper;
+-use Illuminate\Support\Collection;
+ use Illuminate\Support\Facades\Cache;
++use Illuminate\Support\Collection;
+ 
+ class ServerService
+ {
+-    // 获取可用的 VLESS 服务器列表
+-    public static function getAvailableVless(User $user): array
+-    {
+-        $servers = [];
+-        $model = ServerVless::orderBy('sort', 'ASC');
+-        $server = $model->get();
+-        foreach ($server as $key => $v) {
+-            if (!$v['show']) continue;
+-            $serverData = $v->toArray();
+-
+-            $serverData['type'] = 'vless';
+-            if (!in_array($user->group_id, $serverData['group_id'])) continue;
+-            if (strpos($serverData['port'], '-') !== false) {
+-                $serverData['port'] = Helper::randomPort($serverData['port']);
+-            }
+-            if ($serverData['parent_id']) {
+-                $serverData['last_check_at'] = Cache::get(CacheKey::get('SERVER_VLESS_LAST_CHECK_AT', $serverData['parent_id']));
+-            } else {
+-                $serverData['last_check_at'] = Cache::get(CacheKey::get('SERVER_VLESS_LAST_CHECK_AT', $serverData['id']));
+-            }
+-            if (isset($serverData['tls_settings'])) {
+-                if (isset($serverData['tls_settings']['private_key'])) {
+-                    unset($serverData['tls_settings']['private_key']);
+-                }
+-            }
+-
+-            $servers[] = $serverData;
+-        }
+ 
+-        return $servers;
+-    }
+-
+-    // 获取可用的 VMESS 服务器列表
+-    public static function getAvailableVmess(User $user): array
++    /**
++     * 获取所有服务器列表
++     * @return Collection
++     */
++    public static function getAllServers(): Collection
+     {
+-        $servers = [];
+-        $model = ServerVmess::orderBy('sort', 'ASC');
+-        $vmess = $model->get();
+-        foreach ($vmess as $key => $v) {
+-            if (!$v['show']) continue;
+-            $vmess[$key]['type'] = 'vmess';
+-            if (!in_array($user->group_id, $vmess[$key]['group_id'])) continue;
+-            if (strpos($vmess[$key]['port'], '-') !== false) {
+-                $vmess[$key]['port'] = Helper::randomPort($vmess[$key]['port']);
+-            }
+-            if ($vmess[$key]['parent_id']) {
+-                $vmess[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_VMESS_LAST_CHECK_AT', $vmess[$key]['parent_id']));
+-            } else {
+-                $vmess[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_VMESS_LAST_CHECK_AT', $vmess[$key]['id']));
+-            }
+-            $servers[] = $vmess[$key]->toArray();
+-        }
++        $query = Server::orderBy('sort', 'ASC');
+ 
+-        return $servers;
++        return $query->get()->append([
++            'last_check_at',
++            'last_push_at',
++            'online',
++            'is_online',
++            'available_status',
++            'cache_key',
++            'load_status',
++            'metrics',
++            'online_conn'
++        ]);
+     }
+ 
+-    // 获取可用的 TROJAN 服务器列表
+-    public static function getAvailableTrojan(User $user): array
++    /**
++     * 获取机器下所有已启用节点
++     */
++    public static function getMachineNodes(ServerMachine $machine): Collection
+     {
+-        $servers = [];
+-        $model = ServerTrojan::orderBy('sort', 'ASC');
+-        $trojan = $model->get();
+-        foreach ($trojan as $key => $v) {
+-            if (!$v['show']) continue;
+-            $trojan[$key]['type'] = 'trojan';
+-            if (!in_array($user->group_id, $trojan[$key]['group_id'])) continue;
+-            if (strpos($trojan[$key]['port'], '-') !== false) {
+-                $trojan[$key]['port'] = Helper::randomPort($trojan[$key]['port']);
+-            }
+-            if ($trojan[$key]['parent_id']) {
+-                $trojan[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_TROJAN_LAST_CHECK_AT', $trojan[$key]['parent_id']));
+-            } else {
+-                $trojan[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_TROJAN_LAST_CHECK_AT', $trojan[$key]['id']));
+-            }
+-            $servers[] = $trojan[$key]->toArray();
+-        }
+-        return $servers;
++        return Server::where('machine_id', $machine->id)
++            ->where('enabled', true)
++            ->orderBy('sort', 'ASC')
++            ->get();
+     }
+ 
+-    // 获取可用的 HYSTERIA 服务器列表
+-    public static function getAvailableHysteria(User $user)
++    /**
++     * 获取指定用户可用的服务器列表
++     * @param User $user
++     * @return array
++     */
++    public static function getAvailableServers(User $user): array
+     {
+-        $availableServers = [];
+-        $model = ServerHysteria::orderBy('sort', 'ASC');
+-        $servers = $model->get()->keyBy('id');
+-        foreach ($servers as $key => $v) {
+-            if (!$v['show']) continue;
+-            $servers[$key]['type'] = 'hysteria';
+-            $servers[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_HYSTERIA_LAST_CHECK_AT', $v['id']));
+-            if (!in_array($user->group_id, $v['group_id'])) continue;
+-            if (strpos($v['port'], '-') !== false) {
+-                $servers[$key]['ports'] = $v['port'];
+-                $servers[$key]['port'] = Helper::randomPort($v['port']);
+-            }
+-            if (isset($servers[$v['parent_id']])) {
+-                $servers[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_HYSTERIA_LAST_CHECK_AT', $v['parent_id']));
+-                $servers[$key]['created_at'] = $servers[$v['parent_id']]['created_at'];
+-            }
+-            $servers[$key]['server_key'] = Helper::getServerKey($servers[$key]['created_at'], 16);
+-            $availableServers[] = $servers[$key]->toArray();
+-        }
+-        return $availableServers;
+-    }
++        $servers = Server::whereJsonContains('group_ids', (string) $user->group_id)
++            ->where('show', true)
++            ->where(function ($query) {
++                $query->whereNull('transfer_enable')
++                    ->orWhere('transfer_enable', 0)
++                    ->orWhereRaw('u + d < transfer_enable');
++            })
++            ->orderBy('sort', 'ASC')
++            ->get()
++            ->append(['last_check_at', 'last_push_at', 'online', 'is_online', 'available_status', 'cache_key', 'server_key']);
+ 
+-    // 获取可用的 SHADOWSOCKS 服务器列表
+-    public static function getAvailableShadowsocks(User $user)
+-    {
+-        $servers = [];
+-        $model = ServerShadowsocks::orderBy('sort', 'ASC');
+-        $shadowsocks = $model->get()->keyBy('id');
+-        foreach ($shadowsocks as $key => $v) {
+-            if (!$v['show']) continue;
+-            $shadowsocks[$key]['type'] = 'shadowsocks';
+-            $shadowsocks[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_SHADOWSOCKS_LAST_CHECK_AT', $v['id']));
+-            if (!in_array($user->group_id, $v['group_id'])) continue;
+-            if (strpos($v['port'], '-') !== false) {
+-                $shadowsocks[$key]['port'] = Helper::randomPort($v['port']);
+-            }
+-            if (isset($shadowsocks[$v['parent_id']])) {
+-                $shadowsocks[$key]['last_check_at'] = Cache::get(CacheKey::get('SERVER_SHADOWSOCKS_LAST_CHECK_AT', $v['parent_id']));
+-                $shadowsocks[$key]['created_at'] = $shadowsocks[$v['parent_id']]['created_at'];
+-            }
+-            // 处理ss2022密码
+-            $cipherConfiguration = [
+-                '2022-blake3-aes-128-gcm' => [
+-                    'serverKeySize' => 16,
+-                    'userKeySize' => 16,
+-                ],
+-                '2022-blake3-aes-256-gcm' => [
+-                    'serverKeySize' => 32,
+-                    'userKeySize' => 32,
+-                ],
+-                '2022-blake3-chacha20-poly1305' => [
+-                    'serverKeySize' => 32,
+-                    'userKeySize' => 32,
+-                ]
+-            ];
+-            $shadowsocks[$key]['password'] = $user['uuid'];
+-            if (array_key_exists($cipher = $v['cipher'], $cipherConfiguration)) {
+-                $config = $cipherConfiguration[$cipher];
+-                $serverKey = Helper::getServerKey($v['created_at'], $config['serverKeySize']);
+-                $userKey = Helper::uuidToBase64($user['uuid'], $config['userKeySize']);
+-                $shadowsocks[$key]['password'] = "{$serverKey}:{$userKey}";
+-            }
+-            if ($v['obfs'] === 'http') {
+-                $shadowsocks[$key]['obfs'] = 'http';
+-                $shadowsocks[$key]['obfs-host'] = $v['obfs_settings']['host'];
+-                $shadowsocks[$key]['obfs-path'] = $v['obfs_settings']['path'];
++        $servers = collect($servers)->map(function ($server) use ($user) {
++            // 判断动态端口
++            if (str_contains($server->port, '-')) {
++                $port = $server->port;
++                $server->port = (int) Helper::randomPort($port);
++                $server->ports = $port;
++            } else {
++                $server->port = (int) $server->port;
+             }
+-            $servers[] = $shadowsocks[$key]->toArray();
+-        }
+-        return $servers;
+-    }
+-
+-    // 获取可用的服务器列表
+-    public static function getAvailableServers(User $user)
+-    {
+-        $servers = Cache::remember('serversAvailable_'. $user->id, 5, function() use($user){
+-            return array_merge(
+-                self::getAvailableShadowsocks($user),
+-                self::getAvailableVmess($user),
+-                self::getAvailableTrojan($user),
+-                self::getAvailableHysteria($user),
+-                self::getAvailableVless($user)
+-            );
+-        });
+-        $tmp = array_column($servers, 'sort');
+-        array_multisort($tmp, SORT_ASC, $servers);
+-        return array_map(function ($server) {
+-            $server['port'] = (int)$server['port'];
+-            $server['is_online'] = (time() - 300 > $server['last_check_at']) ? 0 : 1;
+-            $server['cache_key'] = "{$server['type']}-{$server['id']}-{$server['updated_at']}-{$server['is_online']}";
++            $server->password = app(NodeAuthAliasService::class)->serverPassword($server, $user);
++            $server->rate = $server->getCurrentRate();
+             return $server;
+-        }, $servers);
++        })->toArray();
++
++        return $servers;
+     }
+ 
+-    // 获取可用的用户列表
+-    public static function getAvailableUsers($groupId): Collection
++    /**
++     * 根据权限组获取可用的用户列表
++     * @param array $groupIds
++     * @return Collection
++     */
++    public static function getAvailableUsers(Server $node)
+     {
+-        return User::toBase()
+-            ->whereIn('group_id', $groupId)
++        $groupIds = $node->group_ids ?? [];
++        if (empty($groupIds)) {
++            return collect();
++        }
++        $users = User::toBase()
++            ->whereIn('group_id', $groupIds)
+             ->whereRaw('u + d < transfer_enable')
+             ->where(function ($query) {
+                 $query->where('expired_at', '>=', time())
+@@ -207,209 +105,342 @@ class ServerService
+             ->select([
+                 'id',
+                 'uuid',
+-                'speed_limit'
++                'speed_limit',
++                'device_limit'
+             ])
+             ->get();
+-    }
+ 
+-    // 记录流量日志
+-    public static function log(int $userId, int $serverId, int $u, int $d, float $rate, string $method)
+-    {
+-        if (($u + $d) < 10240) return true;
+-        $timestamp = strtotime(date('Y-m-d'));
+-        $serverLog = ServerLog::where('log_at', '>=', $timestamp)
+-            ->where('log_at', '<', $timestamp + 3600)
+-            ->where('server_id', $serverId)
+-            ->where('user_id', $userId)
+-            ->where('rate', $rate)
+-            ->where('method', $method)
+-            ->first();
+-        if ($serverLog) {
+-            try {
+-                $serverLog->increment('u', $u);
+-                $serverLog->increment('d', $d);
+-                return true;
+-            } catch (\Exception $e) {
+-                return false;
+-            }
+-        } else {
+-            $serverLog = new ServerLog();
+-            $serverLog->user_id = $userId;
+-            $serverLog->server_id = $serverId;
+-            $serverLog->u = $u;
+-            $serverLog->d = $d;
+-            $serverLog->rate = $rate;
+-            $serverLog->log_at = $timestamp;
+-            $serverLog->method = $method;
+-            return $serverLog->save();
++        // Flyboard 防分享联动：开启订阅防分享时：
++        // 1) 节点端 device_limit 跟订阅防分享允许 IP 数联动，复制节点后超出来源 IP 会被拦截；
++        // 2) 节点认证 UUID/password 改成短期签名凭证，并额外下发上一窗口 auth_aliases，
++        //    允许客户端订阅刷新与节点同步之间有一个窗口的容错，但旧复制链接会随窗口过期。
++        if ((int) admin_setting('subscribe_guard_enable', 1) === 1) {
++            $guardLimit = max(1, min((int) admin_setting('subscribe_guard_max_ips', 3), 255));
++            $auth = app(NodeAuthAliasService::class);
++            $users = $users->map(function ($user) use ($guardLimit, $auth) {
++                $originalUuid = (string) ($user->uuid ?? '');
++                $currentLimit = (int) ($user->device_limit ?? 0);
++                $user->device_limit = $currentLimit > 0 ? min($currentLimit, $guardLimit) : $guardLimit;
++
++                $currentAuth = $auth->currentUuid($user);
++                if ($currentAuth !== '') {
++                    $aliases = array_values(array_filter($auth->authAliases((object) [
++                        'id' => $user->id,
++                        'uuid' => $originalUuid,
++                    ])));
++                    $user->uuid = $currentAuth;
++                    $user->auth_aliases = $aliases;
++                }
++
++                return $user;
++            });
+         }
++
++        return HookManager::filter('server.users.get', $users, $node);
+     }
+ 
+-    // 获取所有 SHADOWSOCKS 服务器列表
+-    public static function getAllShadowsocks()
++    // 获取路由规则
++    public static function getRoutes(array $routeIds)
+     {
+-        $servers = ServerShadowsocks::orderBy('sort', 'ASC')
+-            ->get()
+-            ->toArray();
+-        foreach ($servers as $k => $v) {
+-            $servers[$k]['type'] = 'shadowsocks';
+-        }
+-        return $servers;
++        $routes = ServerRoute::select(['id', 'match', 'action', 'action_value'])->whereIn('id', $routeIds)->get();
++        return $routes;
+     }
+ 
+-    // 获取所有 VMESS 服务器列表
+-    public static function getAllVMess()
++    /**
++     * 处理节点流量数据汇报
++     */
++    public static function processTraffic(Server $node, array $traffic): void
+     {
+-        $servers = ServerVmess::orderBy('sort', 'ASC')
+-            ->get()
+-            ->toArray();
+-        foreach ($servers as $k => $v) {
+-            $servers[$k]['type'] = 'vmess';
++        $data = array_filter($traffic, fn($item) =>
++            is_array($item) && count($item) === 2
++            && is_numeric($item[0]) && is_numeric($item[1])
++        );
++
++        if (empty($data)) {
++            return;
+         }
+-        return $servers;
++
++        $nodeType = strtoupper($node->type);
++        $nodeId = $node->id;
++
++        Cache::put(CacheKey::get("SERVER_{$nodeType}_ONLINE_USER", $nodeId), count($data), 3600);
++        Cache::put(CacheKey::get("SERVER_{$nodeType}_LAST_PUSH_AT", $nodeId), time(), 3600);
++
++        (new UserService())->trafficFetch($node, $node->type, $data);
+     }
+ 
+-    // 获取所有 VLESS 服务器列表
+-    public static function getAllVLess()
++    /**
++     * 处理节点在线设备汇报
++     */
++    public static function processAlive(int $nodeId, array $alive): void
+     {
+-        $servers = ServerVless::orderBy('sort', 'ASC')
+-            ->get()
+-            ->toArray();
+-        foreach ($servers as $k => $v) {
+-            $servers[$k]['type'] = 'vless';
++        $service = app(DeviceStateService::class);
++        foreach ($alive as $uid => $ips) {
++            $service->setDevices((int) $uid, $nodeId, (array) $ips);
+         }
+-        return $servers;
+     }
+ 
+-    // 获取所有 TROJAN 服务器列表
+-    public static function getAllTrojan()
++    /**
++     * 处理节点连接数汇报
++     */
++    public static function processOnline(Server $node, array $online): void
+     {
+-        $servers = ServerTrojan::orderBy('sort', 'ASC')
+-            ->get()
+-            ->toArray();
+-        foreach ($servers as $k => $v) {
+-            $servers[$k]['type'] = 'trojan';
++        $cacheTime = max(300, (int) admin_setting('server_push_interval', 60) * 3);
++        $nodeType = $node->type;
++        $nodeId = $node->id;
++
++        foreach ($online as $uid => $conn) {
++            $cacheKey = CacheKey::get("USER_ONLINE_CONN_{$nodeType}_{$nodeId}", $uid);
++            Cache::put($cacheKey, (int) $conn, $cacheTime);
+         }
+-        return $servers;
+     }
+ 
+-    // 获取所有 HYSTERIA 服务器列表
+-    public static function getAllHysteria()
++    /**
++     * 处理节点负载状态汇报
++     */
++    public static function processStatus(Server $node, array $status): void
+     {
+-        $servers = ServerHysteria::orderBy('sort', 'ASC')
+-            ->get()
+-            ->toArray();
+-        foreach ($servers as $k => $v) {
+-            $servers[$k]['type'] = 'hysteria';
+-        }
+-        return $servers;
++        $nodeType = strtoupper($node->type);
++        $nodeId = $node->id;
++
++        $statusData = [
++            'cpu' => (float) ($status['cpu'] ?? 0),
++            'mem' => [
++                'total' => (int) ($status['mem']['total'] ?? 0),
++                'used' => (int) ($status['mem']['used'] ?? 0),
++            ],
++            'swap' => [
++                'total' => (int) ($status['swap']['total'] ?? 0),
++                'used' => (int) ($status['swap']['used'] ?? 0),
++            ],
++            'disk' => [
++                'total' => (int) ($status['disk']['total'] ?? 0),
++                'used' => (int) ($status['disk']['used'] ?? 0),
++            ],
++            'updated_at' => now()->timestamp,
++            'kernel_status' => $status['kernel_status'] ?? null,
++        ];
++
++        $cacheTime = max(300, (int) admin_setting('server_push_interval', 60) * 3);
++        cache([
++            CacheKey::get("SERVER_{$nodeType}_LOAD_STATUS", $nodeId) => $statusData,
++            CacheKey::get("SERVER_{$nodeType}_LAST_LOAD_AT", $nodeId) => now()->timestamp,
++        ], $cacheTime);
+     }
+ 
+-    // 合并数据
+-    private static function mergeData(&$servers)
++    /**
++     * 标记节点心跳
++     */
++    public static function touchNode(Server $node): void
+     {
+-        foreach ($servers as $k => $v) {
+-            $serverType = strtoupper($v['type']);
+-
+-            $servers[$k]['online'] = Cache::get(CacheKey::get("SERVER_{$serverType}_ONLINE_USER", $v['parent_id'] ?? $v['id'])) ?? 0;
+-            // 如果是子节点，先尝试从缓存中获取
+-            if($pid = $v['parent_id']){
+-                $cacheKey = CacheKey::get('MULTI_SERVER_' . $serverType . '_ONLINE_USER', $pid);
+-                $onlineUsers = Cache::get($cacheKey) ?? [];
+-                $onlineUserSum = collect($onlineUsers)->whereIn('ip', $v['ips'])->sum('online_user');
+-                $online = ($onlineUserSum > 0 ? $onlineUserSum . "|" : "") . $servers[$k]['online'];
+-                $servers[$k]['online'] = $online;
+-            }
+-            $servers[$k]['last_check_at'] = Cache::get(CacheKey::get("SERVER_{$serverType}_LAST_CHECK_AT", $v['parent_id'] ?? $v['id']));
+-            $servers[$k]['last_push_at'] = Cache::get(CacheKey::get("SERVER_{$serverType}_LAST_PUSH_AT", $v['parent_id'] ?? $v['id']));
+-            if ((time() - 300) >= $servers[$k]['last_check_at']) {
+-                $servers[$k]['available_status'] = 0;
+-            } else if ((time() - 300) >= $servers[$k]['last_push_at']) {
+-                $servers[$k]['available_status'] = 1;
+-            } else {
+-                $servers[$k]['available_status'] = 2;
+-            }
+-        }
++        Cache::put(
++            CacheKey::get('SERVER_' . strtoupper($node->type) . '_LAST_CHECK_AT', $node->id),
++            time(),
++            3600
++        );
+     }
+ 
+-    // 获取所有服务器列表
+-    public static function getAllServers()
++    /**
++     * Update node metrics and load status
++     */
++    public static function updateMetrics(Server $node, array $metrics): void
+     {
+-        $servers = array_merge(
+-            self::getAllShadowsocks(),
+-            self::getAllVMess(),
+-            self::getAllTrojan(),
+-            self::getAllHysteria(),
+-            self::getAllVLess()
++        $nodeType = strtoupper($node->type);
++        $nodeId = $node->id;
++        $cacheTime = max(300, (int) admin_setting('server_push_interval', 60) * 3);
++
++        $metricsData = [
++            'uptime' => (int) ($metrics['uptime'] ?? 0),
++            'goroutines' => (int) ($metrics['goroutines'] ?? 0),
++            'active_connections' => (int) ($metrics['active_connections'] ?? 0),
++            'total_connections' => (int) ($metrics['total_connections'] ?? 0),
++            'total_users' => (int) ($metrics['total_users'] ?? 0),
++            'active_users' => (int) ($metrics['active_users'] ?? 0),
++            'inbound_speed' => (int) ($metrics['inbound_speed'] ?? 0),
++            'outbound_speed' => (int) ($metrics['outbound_speed'] ?? 0),
++            'cpu_per_core' => $metrics['cpu_per_core'] ?? [],
++            'load' => $metrics['load'] ?? [],
++            'speed_limiter' => $metrics['speed_limiter'] ?? [],
++            'gc' => $metrics['gc'] ?? [],
++            'api' => $metrics['api'] ?? [],
++            'ws' => $metrics['ws'] ?? [],
++            'limits' => $metrics['limits'] ?? [],
++            'updated_at' => now()->timestamp,
++            'kernel_status' => (bool) ($metrics['kernel_status'] ?? false),
++        ];
++
++        Cache::put(
++            CacheKey::get('SERVER_' . $nodeType . '_METRICS', $nodeId),
++            $metricsData,
++            $cacheTime
+         );
+-        self::mergeData($servers);
+-        $tmp = array_column($servers, 'sort');
+-        array_multisort($tmp, SORT_ASC, $servers);
+-        return $servers;
+     }
+ 
+-    // 获取路由规则
+-    public static function getRoutes(array $routeIds)
++    public static function buildNodeConfig(Server $node): array
+     {
+-        $routes = ServerRoute::select(['id', 'match', 'action', 'action_value'])->whereIn('id', $routeIds)->get();
+-        // TODO: remove on 1.8.0
+-        foreach ($routes as $k => $route) {
+-            $array = json_decode($route->match, true);
+-            if (is_array($array)) $routes[$k]['match'] = $array;
++        $nodeType = $node->type;
++        $protocolSettings = $node->protocol_settings;
++        $serverPort = $node->server_port;
++        $host = $node->host;
++
++        $baseConfig = [
++            'protocol' => $nodeType,
++            'listen_ip' => '0.0.0.0',
++            'server_port' => (int) $serverPort,
++            'network' => data_get($protocolSettings, 'network'),
++            'networkSettings' => data_get($protocolSettings, 'network_settings') ?: null,
++        ];
++
++        $response = match ($nodeType) {
++            'shadowsocks' => [
++                ...$baseConfig,
++                'cipher' => $protocolSettings['cipher'],
++                'plugin' => $protocolSettings['plugin'],
++                'plugin_opts' => $protocolSettings['plugin_opts'],
++                'server_key' => match ($protocolSettings['cipher']) {
++                        '2022-blake3-aes-128-gcm' => Helper::getServerKey($node->created_at, 16),
++                        '2022-blake3-aes-256-gcm' => Helper::getServerKey($node->created_at, 32),
++                        default => null,
++                    },
++            ],
++            'vmess' => [
++                ...$baseConfig,
++                'tls' => (int) $protocolSettings['tls'],
++                'tls_settings' => $protocolSettings['tls_settings'],
++                'multiplex' => data_get($protocolSettings, 'multiplex'),
++            ],
++            'trojan' => [
++                ...$baseConfig,
++                'host' => $host,
++                'server_name' => data_get($protocolSettings, 'tls_settings.server_name'),
++                'multiplex' => data_get($protocolSettings, 'multiplex'),
++                'tls' => (int) $protocolSettings['tls'],
++                'tls_settings' => match ((int) $protocolSettings['tls']) {
++                        2 => $protocolSettings['reality_settings'],
++                        default => $protocolSettings['tls_settings'],
++                    },
++            ],
++            'vless' => [
++                ...$baseConfig,
++                'tls' => (int) $protocolSettings['tls'],
++                'flow' => $protocolSettings['flow'],
++                'decryption' => match (data_get($protocolSettings, 'encryption.enabled')) {
++                    true => data_get($protocolSettings, 'encryption.decryption'),
++                    default => null,
++                },
++                'tls_settings' => match ((int) $protocolSettings['tls']) {
++                        2 => $protocolSettings['reality_settings'],
++                        default => $protocolSettings['tls_settings'],
++                    },
++                'multiplex' => data_get($protocolSettings, 'multiplex'),
++            ],
++            'hysteria' => [
++                ...$baseConfig,
++                'server_port' => (int) $serverPort,
++                'version' => (int) $protocolSettings['version'],
++                'host' => $host,
++                'server_name' => $protocolSettings['tls']['server_name'],
++                'tls_settings' => $protocolSettings['tls'],
++                'up_mbps' => (int) $protocolSettings['bandwidth']['up'],
++                'down_mbps' => (int) $protocolSettings['bandwidth']['down'],
++                ...match ((int) $protocolSettings['version']) {
++                        1 => ['obfs' => $protocolSettings['obfs']['password'] ?? null],
++                        2 => [
++                            'obfs' => $protocolSettings['obfs']['open'] ? $protocolSettings['obfs']['type'] : null,
++                            'obfs-password' => $protocolSettings['obfs']['password'] ?? null,
++                        ],
++                        default => [],
++                    },
++            ],
++            'tuic' => [
++                ...$baseConfig,
++                'version' => (int) $protocolSettings['version'],
++                'server_port' => (int) $serverPort,
++                'server_name' => $protocolSettings['tls']['server_name'],
++                'congestion_control' => $protocolSettings['congestion_control'],
++                'tls_settings' => $protocolSettings['tls'],
++                'auth_timeout' => '3s',
++                'zero_rtt_handshake' => false,
++                'heartbeat' => '3s',
++            ],
++            'anytls' => [
++                ...$baseConfig,
++                'server_port' => (int) $serverPort,
++                'server_name' => $protocolSettings['tls']['server_name'],
++                'tls_settings' => $protocolSettings['tls'],
++                'padding_scheme' => $protocolSettings['padding_scheme'],
++            ],
++            'socks' => [
++                ...$baseConfig,
++                'server_port' => (int) $serverPort,
++                'tls' => (int) data_get($protocolSettings, 'tls', 0),
++                'tls_settings' => data_get($protocolSettings, 'tls_settings'),
++            ],
++            'naive' => [
++                ...$baseConfig,
++                'server_port' => (int) $serverPort,
++                'tls' => (int) $protocolSettings['tls'],
++                'tls_settings' => $protocolSettings['tls_settings'],
++            ],
++            'http' => [
++                ...$baseConfig,
++                'server_port' => (int) $serverPort,
++                'tls' => (int) $protocolSettings['tls'],
++                'tls_settings' => $protocolSettings['tls_settings'],
++            ],
++            'mieru' => [
++                ...$baseConfig,
++                'server_port' => (int) $serverPort,
++                'transport' => data_get($protocolSettings, 'transport', 'TCP'),
++                'traffic_pattern' => $protocolSettings['traffic_pattern'],
++            ],
++            default => [],
++        };
++
++        if (!empty($node['route_ids'])) {
++            $response['routes'] = self::getRoutes($node['route_ids']);
+         }
+-        // TODO: remove on 1.8.0
+-        return $routes;
+-    }
+ 
+-    // 获取服务器
+-    public static function getServer($serverId, $serverType)
+-    {
+-        switch ($serverType) {
+-            case 'vmess':
+-                return ServerVmess::find($serverId);
+-            case 'shadowsocks':
+-                return ServerShadowsocks::find($serverId);
+-            case 'trojan':
+-                return ServerTrojan::find($serverId);
+-            case 'hysteria':
+-                return ServerHysteria::find($serverId);
+-            case 'vless':
+-                return ServerVless::find($serverId);
+-            default:
+-                return false;
++        if (!empty($node['custom_outbounds'])) {
++            $response['custom_outbounds'] = $node['custom_outbounds'];
+         }
+-    }
+ 
+-    // 根据节点IP和父级别节点ID查询子节点
+-    public static function getChildServer($serverId, $serverType, $nodeIp){
+-        switch ($serverType) {
+-            case 'vmess':
+-                return ServerVmess::query()
+-                        ->where("parent_id", $serverId)
+-                        ->where('ips',"like", "%\"$nodeIp\"%")
+-                        ->first();
+-            case 'shadowsocks':
+-                return ServerShadowsocks::query()
+-                        ->where("parent_id", $serverId)
+-                        ->where('ips',"like", "%\"$nodeIp\"%")
+-                        ->first();
+-            case 'trojan':
+-                return ServerTrojan::query()
+-                        ->where("parent_id", $serverId)
+-                        ->where('ips',"like", "%\"$nodeIp\"%")
+-                        ->first();
+-            case 'hysteria':
+-                return ServerHysteria::query()
+-                        ->where("parent_id", $serverId)
+-                        ->where('ips',"like", "%\"$nodeIp\"%")
+-                        ->first();
+-            case 'vless':
+-                return ServerVless::query()
+-                        ->where("parent_id", $serverId)
+-                        ->where('ips',"like", "%\"$nodeIp\"%")
+-                        ->first();
+-            default:
+-                return null;
++        if (!empty($node['custom_routes'])) {
++            $response['custom_routes'] = $node['custom_routes'];
+         }
++
++        if (!empty($node['cert_config'])) {
++            $certConfig = $node['cert_config'];
++            // Normalize: accept both "mode" and "cert_mode" from the database
++            if (isset($certConfig['mode']) && !isset($certConfig['cert_mode'])) {
++                $certConfig['cert_mode'] = $certConfig['mode'];
++                unset($certConfig['mode']);
++            }
++            if (data_get($certConfig, 'cert_mode') !== 'none') {
++                $response['cert_config'] = $certConfig;
++            }
++        }
++
++        return $response;
++    }
++
++    /**
++     * 根据协议类型和标识获取服务器
++     * @param int $serverId
++     * @param string $serverType
++     * @return Server|null
++     */
++    public static function getServer($serverId, ?string $serverType = null): Server | null
++    {
++        return Server::query()
++            ->when($serverType, function ($query) use ($serverType) {
++                $query->where('type', Server::normalizeType($serverType));
++            })
++            ->where(function ($query) use ($serverId) {
++                $query->where('code', $serverId)
++                    ->orWhere('id', $serverId);
++            })
++            ->orderByRaw('CASE WHEN code = ? THEN 0 ELSE 1 END', [$serverId])
++            ->first();
+     }
+ }

@@ -1,0 +1,887 @@
+diff --git a/internal/kernel/kernel.go b/internal/kernel/kernel.go
+index 474f3ff..3ae81fa 100644
+--- a/internal/kernel/kernel.go
++++ b/internal/kernel/kernel.go
+@@ -113,7 +113,7 @@ func ComputeHash(nc *model.NodeSpec, users []model.UserSpec) string {
+ 	copy(sorted, users)
+ 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+ 	for _, u := range sorted {
+-		fmt.Fprintf(h, "%d:%s,", u.ID, u.UUID)
++		fmt.Fprintf(h, "%d:%s:%v,", u.ID, u.UUID, u.AuthAliases)
+ 	}
+ 	return fmt.Sprintf("%x", h.Sum(nil))
+ }
+@@ -133,12 +133,13 @@ func UserDiff(oldUsers, newUsers []model.UserSpec) (toAdd, toRemove []model.User
+ 
+ 	for _, u := range newUsers {
+ 		old, exists := oldMap[u.ID]
+-		if !exists || old.UUID != u.UUID {
++		if !exists || old.UUID != u.UUID || fmt.Sprint(old.AuthAliases) != fmt.Sprint(u.AuthAliases) {
+ 			toAdd = append(toAdd, u)
+ 		}
+ 	}
+ 	for _, u := range oldUsers {
+-		if _, exists := newMap[u.ID]; !exists {
++		newUser, exists := newMap[u.ID]
++		if !exists || u.UUID != newUser.UUID || fmt.Sprint(u.AuthAliases) != fmt.Sprint(newUser.AuthAliases) {
+ 			toRemove = append(toRemove, u)
+ 		}
+ 	}
+diff --git a/internal/kernel/singbox/config.go b/internal/kernel/singbox/config.go
+index fe11766..c1ec4c3 100644
+--- a/internal/kernel/singbox/config.go
++++ b/internal/kernel/singbox/config.go
+@@ -475,10 +475,12 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+ 
+ 	userList := make([]M, 0, len(users))
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"name":     u.UUID,
+-			"password": u.UUID,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"name":     auth,
++				"password": auth,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 	return base
+@@ -504,7 +506,7 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+ 		base["password"] = nc.ServerKey
+ 	}
+ 
+-	userList := make([]M, len(users))
++	userList := make([]M, 0, len(users)*2)
+ 	var rawBuf []byte
+ 	if isSS2022 {
+ 		rawBuf = make([]byte, ss2022.size)
+@@ -512,20 +514,22 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+ 
+ 	for i := range users {
+ 		u := &users[i]
+-		user := M{
+-			"name":     u.UUID,
+-			"password": u.UUID,
+-		}
++		for _, auth := range u.AuthUUIDs() {
++			user := M{
++				"name":     auth,
++				"password": auth,
++			}
+ 
+-		if isSS2022 {
+-			// Reuse buffer and clear it to maintain SS2022 key integrity
+-			for j := range rawBuf {
+-				rawBuf[j] = 0
++			if isSS2022 {
++				// Reuse buffer and clear it to maintain SS2022 key integrity
++				for j := range rawBuf {
++					rawBuf[j] = 0
++				}
++				copy(rawBuf, auth)
++				user["password"] = base64.StdEncoding.EncodeToString(rawBuf)
+ 			}
+-			copy(rawBuf, u.UUID)
+-			user["password"] = base64.StdEncoding.EncodeToString(rawBuf)
++			userList = append(userList, user)
+ 		}
+-		userList[i] = user
+ 	}
+ 	base["users"] = userList
+ 
+@@ -541,11 +545,13 @@ func buildVMess(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
+ 
+ 	userList := make([]M, 0, len(users))
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"name":    u.UUID,
+-			"uuid":    u.UUID,
+-			"alterId": 0,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"name":    auth,
++				"uuid":    auth,
++				"alterId": 0,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 
+@@ -571,14 +577,16 @@ func buildVLESS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
+ 
+ 	userList := make([]M, 0, len(users))
+ 	for _, u := range users {
+-		user := M{
+-			"name": u.UUID,
+-			"uuid": u.UUID,
+-		}
+-		if nc.Flow != "" {
+-			user["flow"] = nc.Flow
++		for _, auth := range u.AuthUUIDs() {
++			user := M{
++				"name": auth,
++				"uuid": auth,
++			}
++			if nc.Flow != "" {
++				user["flow"] = nc.Flow
++			}
++			userList = append(userList, user)
+ 		}
+-		userList = append(userList, user)
+ 	}
+ 	base["users"] = userList
+ 
+@@ -600,12 +608,14 @@ func buildVLESS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
+ func buildTrojan(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+ 	base["type"] = "trojan"
+ 
+-	userList := make([]M, len(users))
++	userList := make([]M, 0, len(users)*2)
+ 	for i := range users {
+ 		u := &users[i]
+-		userList[i] = M{
+-			"name":     u.UUID,
+-			"password": u.UUID,
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"name":     auth,
++				"password": auth,
++			})
+ 		}
+ 	}
+ 	base["users"] = userList
+@@ -640,12 +650,14 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
+ 	if nc.Version == 2 {
+ 		base["type"] = "hysteria2"
+ 
+-		userList := make([]M, 0, len(users))
++		userList := make([]M, 0, len(users)*2)
+ 		for _, u := range users {
+-			userList = append(userList, M{
+-				"name":     u.UUID,
+-				"password": u.UUID,
+-			})
++			for _, auth := range u.AuthUUIDs() {
++				userList = append(userList, M{
++					"name":     auth,
++					"password": auth,
++				})
++			}
+ 		}
+ 		base["users"] = userList
+ 
+@@ -658,12 +670,14 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
+ 	} else {
+ 		base["type"] = "hysteria"
+ 
+-		userList := make([]M, 0, len(users))
++		userList := make([]M, 0, len(users)*2)
+ 		for _, u := range users {
+-			userList = append(userList, M{
+-				"name":     u.UUID,
+-				"auth_str": u.UUID,
+-			})
++			for _, auth := range u.AuthUUIDs() {
++				userList = append(userList, M{
++					"name":     auth,
++					"auth_str": auth,
++				})
++			}
+ 		}
+ 		base["users"] = userList
+ 		base["up_mbps"] = nc.UpMbps
+@@ -690,13 +704,15 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
+ func buildTUIC(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+ 	base["type"] = "tuic"
+ 
+-	userList := make([]M, 0, len(users))
++	userList := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"name":     u.UUID,
+-			"uuid":     u.UUID,
+-			"password": u.UUID,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"name":     auth,
++				"uuid":     auth,
++				"password": auth,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 
+@@ -722,10 +738,12 @@ func buildAnyTLS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
+ 
+ 	userList := make([]M, 0, len(users))
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"name":     u.UUID,
+-			"password": u.UUID,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"name":     auth,
++				"password": auth,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 
+@@ -744,12 +762,14 @@ func buildAnyTLS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
+ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+ 	base["type"] = "naive"
+ 
+-	userList := make([]M, 0, len(users))
++	userList := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"username": strconv.Itoa(u.ID),
+-			"password": u.UUID,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"username": strconv.Itoa(u.ID),
++				"password": auth,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 
+@@ -764,12 +784,14 @@ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
+ func buildSocks(base M, users []model.UserSpec) M {
+ 	base["type"] = "socks"
+ 
+-	userList := make([]M, 0, len(users))
++	userList := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"username": u.UUID,
+-			"password": u.UUID,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"username": auth,
++				"password": auth,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 	return base
+@@ -778,12 +800,14 @@ func buildSocks(base M, users []model.UserSpec) M {
+ func buildHTTP(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+ 	base["type"] = "http"
+ 
+-	userList := make([]M, 0, len(users))
++	userList := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		userList = append(userList, M{
+-			"username": u.UUID,
+-			"password": u.UUID,
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			userList = append(userList, M{
++				"username": auth,
++				"password": auth,
++			})
++		}
+ 	}
+ 	base["users"] = userList
+ 
+diff --git a/internal/kernel/xray/config.go b/internal/kernel/xray/config.go
+index 1603f7b..3309890 100644
+--- a/internal/kernel/xray/config.go
++++ b/internal/kernel/xray/config.go
+@@ -1,6 +1,7 @@
+ package xray
+ 
+ import (
++	"crypto/sha1"
+ 	"encoding/base64"
+ 	"encoding/pem"
+ 	"fmt"
+@@ -234,20 +235,34 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
+ 	}
+ }
+ 
+-// userEmail returns the stats-tracking email for a user.
+-// Format: "user@<id>" so we can parse back the user ID from stats counters.
+-func userEmail(userID int) string {
+-	return fmt.Sprintf("user@%d", userID)
++// userEmail returns the stats-tracking email for a user auth credential.
++// The canonical UUID keeps the legacy "user@<id>" form; aliases get a stable
++// suffix so xray UserManager can add/remove each credential independently.
++func userEmail(userID int, auth ...string) string {
++	if len(auth) == 0 || auth[0] == "" {
++		return fmt.Sprintf("user@%d", userID)
++	}
++	sum := sha1.Sum([]byte(auth[0]))
++	return fmt.Sprintf("user@%d@%x", userID, sum[:4])
++}
++
++func userAuthEmail(u model.UserSpec, auth string) string {
++	if auth == "" || auth == u.UUID {
++		return userEmail(u.ID)
++	}
++	return userEmail(u.ID, auth)
+ }
+ 
+ func buildVMess(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+-	clients := make([]M, 0, len(users))
++	clients := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		clients = append(clients, M{
+-			"id":      u.UUID,
+-			"alterId": 0,
+-			"email":   userEmail(u.ID),
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			clients = append(clients, M{
++				"id":      auth,
++				"alterId": 0,
++				"email":   userAuthEmail(u, auth),
++			})
++		}
+ 	}
+ 	base["settings"] = M{"clients": clients}
+ 
+@@ -256,16 +271,18 @@ func buildVMess(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
+ }
+ 
+ func buildVLESS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+-	clients := make([]M, 0, len(users))
++	clients := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		client := M{
+-			"id":    u.UUID,
+-			"email": userEmail(u.ID),
+-		}
+-		if nc.Flow != "" {
+-			client["flow"] = nc.Flow
++		for _, auth := range u.AuthUUIDs() {
++			client := M{
++				"id":    auth,
++				"email": userAuthEmail(u, auth),
++			}
++			if nc.Flow != "" {
++				client["flow"] = nc.Flow
++			}
++			clients = append(clients, client)
+ 		}
+-		clients = append(clients, client)
+ 	}
+ 	decryption := "none"
+ 	if nc.Decryption != "" {
+@@ -281,12 +298,14 @@ func buildVLESS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
+ }
+ 
+ func buildTrojan(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+-	clients := make([]M, len(users))
++	clients := make([]M, 0, len(users)*2)
+ 	for i := range users {
+ 		u := &users[i]
+-		clients[i] = M{
+-			"password": u.UUID,
+-			"email":    userEmail(u.ID),
++		for _, auth := range u.AuthUUIDs() {
++			clients = append(clients, M{
++				"password": auth,
++				"email":    userAuthEmail(u, auth),
++			})
+ 		}
+ 	}
+ 	base["settings"] = M{"clients": clients}
+@@ -327,14 +346,16 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+ 		rawBuf := make([]byte, ss2022.size)
+ 		for i := range users {
+ 			u := &users[i]
+-			for j := range rawBuf {
+-				rawBuf[j] = 0
++			for _, auth := range u.AuthUUIDs() {
++				for j := range rawBuf {
++					rawBuf[j] = 0
++				}
++				copy(rawBuf, auth)
++				clients = append(clients, M{
++					"password": base64.StdEncoding.EncodeToString(rawBuf),
++					"email":    userAuthEmail(u, auth),
++				})
+ 			}
+-			copy(rawBuf, u.UUID)
+-			clients = append(clients, M{
+-				"password": base64.StdEncoding.EncodeToString(rawBuf),
+-				"email":    userEmail(u.ID),
+-			})
+ 		}
+ 		base["settings"] = M{
+ 			"method":   nc.Cipher,
+@@ -347,11 +368,13 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+ 		// Each entry must carry its own "method" field for Xray to parse correctly.
+ 		for i := range users {
+ 			u := &users[i]
+-			clients = append(clients, M{
+-				"method":   nc.Cipher,
+-				"password": u.UUID,
+-				"email":    userEmail(u.ID),
+-			})
++			for _, auth := range u.AuthUUIDs() {
++				clients = append(clients, M{
++					"method":   nc.Cipher,
++					"password": auth,
++					"email":    userAuthEmail(u, auth),
++				})
++			}
+ 		}
+ 		base["settings"] = M{
+ 			"method":  nc.Cipher,
+@@ -364,13 +387,15 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+ 
+ func buildSocks(base M, users []model.UserSpec) M {
+ 	base["protocol"] = "socks"
+-	accounts := make([]M, 0, len(users))
++	accounts := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		accounts = append(accounts, M{
+-			"user":  u.UUID,
+-			"pass":  u.UUID,
+-			"email": userEmail(u.ID),
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			accounts = append(accounts, M{
++				"user":  auth,
++				"pass":  auth,
++				"email": userAuthEmail(u, auth),
++			})
++		}
+ 	}
+ 	base["settings"] = M{
+ 		"auth":     "password",
+@@ -382,13 +407,15 @@ func buildSocks(base M, users []model.UserSpec) M {
+ 
+ func buildHTTP(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+ 	base["protocol"] = "http"
+-	accounts := make([]M, 0, len(users))
++	accounts := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		accounts = append(accounts, M{
+-			"user":  u.UUID,
+-			"pass":  u.UUID,
+-			"email": userEmail(u.ID),
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			accounts = append(accounts, M{
++				"user":  auth,
++				"pass":  auth,
++				"email": userAuthEmail(u, auth),
++			})
++		}
+ 	}
+ 	base["settings"] = M{
+ 		"accounts": accounts,
+@@ -407,12 +434,14 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
+ 		return nil
+ 	}
+ 
+-	clients := make([]M, 0, len(users))
++	clients := make([]M, 0, len(users)*2)
+ 	for _, u := range users {
+-		clients = append(clients, M{
+-			"auth":  u.UUID,
+-			"email": userEmail(u.ID),
+-		})
++		for _, auth := range u.AuthUUIDs() {
++			clients = append(clients, M{
++				"auth":  auth,
++				"email": userAuthEmail(u, auth),
++			})
++		}
+ 	}
+ 	base["settings"] = M{"clients": clients}
+ 
+diff --git a/internal/kernel/xray/xray.go b/internal/kernel/xray/xray.go
+index 1a10626..76cd2ce 100644
+--- a/internal/kernel/xray/xray.go
++++ b/internal/kernel/xray/xray.go
+@@ -15,9 +15,9 @@ import (
+ 	"github.com/xtls/xray-core/common/protocol"
+ 	"github.com/xtls/xray-core/common/uuid"
+ 	xrayCore "github.com/xtls/xray-core/core"
++	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
+ 	"github.com/xtls/xray-core/features/inbound"
+ 	"github.com/xtls/xray-core/features/stats"
+-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
+ 	"github.com/xtls/xray-core/infra/conf/serial"
+ 	xrayProxy "github.com/xtls/xray-core/proxy"
+ 	"github.com/xtls/xray-core/proxy/shadowsocks"
+@@ -32,8 +32,8 @@ import (
+ 	"github.com/cedar2025/xboard-node/internal/config"
+ 	"github.com/cedar2025/xboard-node/internal/kernel"
+ 	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
+-	"github.com/cedar2025/xboard-node/internal/nlog"
+ 	"github.com/cedar2025/xboard-node/internal/model"
++	"github.com/cedar2025/xboard-node/internal/nlog"
+ )
+ 
+ const (
+@@ -314,7 +314,7 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
+ 		x.users = merged
+ 		x.mu.Unlock()
+ 		x.updateDispatcherLimits(merged)
+-	x.updateBandwidthLimits(merged)
++		x.updateBandwidthLimits(merged)
+ 		return 0, nil
+ 	}
+ 
+@@ -337,16 +337,18 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
+ 	ctx := context.Background()
+ 	added := 0
+ 	for _, u := range toAdd {
+-		mu, err := toMemoryUser(proto, nc, u)
+-		if err != nil {
+-			nlog.Core().Warn("xray: skip user, cannot build account", "user", u.ID, "error", err)
+-			continue
+-		}
+-		if err := um.AddUser(ctx, mu); err != nil {
+-			nlog.Core().Warn("xray: AddUser failed", "user", u.ID, "error", err)
+-			continue
++		for _, auth := range u.AuthUUIDs() {
++			mu, err := toMemoryUser(proto, nc, u, auth)
++			if err != nil {
++				nlog.Core().Warn("xray: skip user, cannot build account", "user", u.ID, "auth", auth, "error", err)
++				continue
++			}
++			if err := um.AddUser(ctx, mu); err != nil {
++				nlog.Core().Warn("xray: AddUser failed", "user", u.ID, "auth", auth, "error", err)
++				continue
++			}
++			added++
+ 		}
+-		added++
+ 	}
+ 
+ 	// Update bookkeeping with full merged list (new users + updated properties).
+@@ -407,12 +409,14 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
+ 	ctx := context.Background()
+ 	actualRemoved := 0
+ 	for _, u := range users {
+-		email := userEmail(u.ID)
+-		if err := um.RemoveUser(ctx, email); err != nil {
+-			nlog.Core().Debug("xray: RemoveUser skipped", "user", u.ID, "error", err)
+-			continue
++		for _, auth := range u.AuthUUIDs() {
++			email := userAuthEmail(u, auth)
++			if err := um.RemoveUser(ctx, email); err != nil {
++				nlog.Core().Debug("xray: RemoveUser skipped", "user", u.ID, "auth", auth, "error", err)
++				continue
++			}
++			actualRemoved++
+ 		}
+-		actualRemoved++
+ 	}
+ 
+ 	x.mu.Lock()
+@@ -467,19 +471,23 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
+ 
+ 	// Remove first, then add (order matters for UUID changes on same ID)
+ 	for _, u := range toRemove {
+-		email := userEmail(u.ID)
+-		if err := um.RemoveUser(ctx, email); err != nil {
+-			nlog.Core().Debug("xray: RemoveUser skipped in UpdateUsers", "user", u.ID, "error", err)
++		for _, auth := range u.AuthUUIDs() {
++			email := userAuthEmail(u, auth)
++			if err := um.RemoveUser(ctx, email); err != nil {
++				nlog.Core().Debug("xray: RemoveUser skipped in UpdateUsers", "user", u.ID, "auth", auth, "error", err)
++			}
+ 		}
+ 	}
+ 	for _, u := range toAdd {
+-		mu, err := toMemoryUser(proto, nc, u)
+-		if err != nil {
+-			nlog.Core().Warn("xray: skip user in UpdateUsers", "user", u.ID, "error", err)
+-			continue
+-		}
+-		if err := um.AddUser(ctx, mu); err != nil {
+-			nlog.Core().Warn("xray: AddUser failed in UpdateUsers", "user", u.ID, "error", err)
++		for _, auth := range u.AuthUUIDs() {
++			mu, err := toMemoryUser(proto, nc, u, auth)
++			if err != nil {
++				nlog.Core().Warn("xray: skip user in UpdateUsers", "user", u.ID, "auth", auth, "error", err)
++				continue
++			}
++			if err := um.AddUser(ctx, mu); err != nil {
++				nlog.Core().Warn("xray: AddUser failed in UpdateUsers", "user", u.ID, "auth", auth, "error", err)
++			}
+ 		}
+ 	}
+ 
+@@ -534,13 +542,17 @@ func (x *Xray) getUserManager() (xrayProxy.UserManager, error) {
+ 
+ // toMemoryUser converts a model.UserSpec into an xray protocol.MemoryUser for the
+ // given protocol. Each protocol needs a different Account type.
+-func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol.MemoryUser, error) {
+-	email := userEmail(u.ID)
++func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec, authOverride ...string) (*protocol.MemoryUser, error) {
++	auth := u.UUID
++	if len(authOverride) > 0 && authOverride[0] != "" {
++		auth = authOverride[0]
++	}
++	email := userAuthEmail(u, auth)
+ 	mu := &protocol.MemoryUser{Email: email, Level: 0}
+ 
+ 	switch proto {
+ 	case "vmess":
+-		id, err := uuid.ParseString(u.UUID)
++		id, err := uuid.ParseString(auth)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("parse vmess UUID: %w", err)
+ 		}
+@@ -550,7 +562,7 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
+ 		}
+ 
+ 	case "vless":
+-		id, err := uuid.ParseString(u.UUID)
++		id, err := uuid.ParseString(auth)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("parse vless UUID: %w", err)
+ 		}
+@@ -565,18 +577,18 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
+ 
+ 	case "trojan":
+ 		mu.Account = &trojan.MemoryAccount{
+-			Password: u.UUID,
+-			Key:      trojanHexSha224(u.UUID),
++			Password: auth,
++			Key:      trojanHexSha224(auth),
+ 		}
+ 
+ 	case "shadowsocks":
+ 		if strings.HasPrefix(nc.Cipher, "2022-blake3-") {
+ 			// 2022-blake3 multi-user mode
+-			mu.Account = &ss2022.MemoryAccount{Key: u.UUID}
++			mu.Account = &ss2022.MemoryAccount{Key: auth}
+ 		} else {
+ 			// Traditional SS — build via getCipher path
+ 			ct := parseCipherType(nc.Cipher)
+-			cipherObj, err := (&shadowsocks.Account{CipherType: ct, Password: u.UUID}).AsAccount()
++			cipherObj, err := (&shadowsocks.Account{CipherType: ct, Password: auth}).AsAccount()
+ 			if err != nil {
+ 				return nil, fmt.Errorf("build ss account: %w", err)
+ 			}
+@@ -718,14 +730,15 @@ func (x *Xray) aggregateStats() (map[int][2]int64, error) {
+ 
+ 	traffic := make(map[int][2]int64)
+ 	for _, u := range x.users {
+-		email := userEmail(u.ID)
+-
+ 		var dUp, dDown int64
+-		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>uplink", email)); c != nil {
+-			dUp = c.Set(0)
+-		}
+-		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>downlink", email)); c != nil {
+-			dDown = c.Set(0)
++		for _, auth := range u.AuthUUIDs() {
++			email := userAuthEmail(u, auth)
++			if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>uplink", email)); c != nil {
++				dUp += c.Set(0)
++			}
++			if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>downlink", email)); c != nil {
++				dDown += c.Set(0)
++			}
+ 		}
+ 
+ 		if dUp > 0 || dDown > 0 {
+@@ -766,13 +779,15 @@ func (x *Xray) updateBandwidthLimits(users []model.UserSpec) {
+ 		users = currentUsers
+ 	}
+ 	for _, u := range users {
+-		email := userEmail(u.ID)
+-		if fn != nil {
+-			bm.SetUserLimiter(email, fn(u.UUID))
+-			continue
++		for _, auth := range u.AuthUUIDs() {
++			email := userAuthEmail(u, auth)
++			if fn != nil {
++				bm.SetUserLimiter(email, fn(auth))
++				continue
++			}
++			bps := int64(u.SpeedLimit) * 1_000_000 / 8
++			bm.SetUserLimit(email, bps)
+ 		}
+-		bps := int64(u.SpeedLimit) * 1_000_000 / 8
+-		bm.SetUserLimit(email, bps)
+ 	}
+ }
+ 
+@@ -787,16 +802,18 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
+ 		return
+ 	}
+ 
+-	emailToUID := make(map[string]int, len(users)*2)
++	emailToUID := make(map[string]int, len(users)*3)
+ 	deviceLimits := make(map[string]int)
+ 
+ 	for _, u := range users {
+-		email := userEmail(u.ID)
+-		emailToUID[email] = u.ID
+-		emailToUID[u.UUID] = u.ID
+-		if u.DeviceLimit > 0 {
+-			deviceLimits[email] = u.DeviceLimit
+-			deviceLimits[u.UUID] = u.DeviceLimit
++		for _, auth := range u.AuthUUIDs() {
++			email := userAuthEmail(u, auth)
++			emailToUID[email] = u.ID
++			emailToUID[auth] = u.ID
++			if u.DeviceLimit > 0 {
++				deviceLimits[email] = u.DeviceLimit
++				deviceLimits[auth] = u.DeviceLimit
++			}
+ 		}
+ 	}
+ 
+diff --git a/internal/limiter/limiter.go b/internal/limiter/limiter.go
+index bf46ef6..485dd32 100644
+--- a/internal/limiter/limiter.go
++++ b/internal/limiter/limiter.go
+@@ -51,7 +51,9 @@ func (l *Limiter) UpdateUsers(users []model.UserSpec) []int {
+ 	idx := make(map[string]int, len(newUsers))
+ 	for _, u := range newUsers {
+ 		if u.DeviceLimit > 0 {
+-			idx[u.UUID] = u.DeviceLimit
++			for _, auth := range u.AuthUUIDs() {
++				idx[auth] = u.DeviceLimit
++			}
+ 		}
+ 	}
+ 	l.uuidDeviceLimit = idx
+diff --git a/internal/limiter/speedtracker.go b/internal/limiter/speedtracker.go
+index ddb6f2a..3c5eabd 100644
+--- a/internal/limiter/speedtracker.go
++++ b/internal/limiter/speedtracker.go
+@@ -61,8 +61,8 @@ func (t *SpeedTracker) UpdateBuckets() {
+ 
+ 		for _, user := range currentUsers {
+ 			activeIDs[user.ID] = struct{}{}
+-			if user.UUID != "" {
+-				newUUIDMap[user.UUID] = user.ID
++			for _, auth := range user.AuthUUIDs() {
++				newUUIDMap[auth] = user.ID
+ 			}
+ 
+ 			// Update existing limiter if speed changed
+diff --git a/internal/model/panel.go b/internal/model/panel.go
+index c7d90d3..af5d495 100644
+--- a/internal/model/panel.go
++++ b/internal/model/panel.go
+@@ -139,7 +139,7 @@ func UserSpecsFromPanel(users []panel.User) []UserSpec {
+ 	}
+ 	out := make([]UserSpec, 0, len(users))
+ 	for _, user := range users {
+-		out = append(out, UserSpec{ID: user.ID, UUID: user.UUID, SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
++		out = append(out, UserSpec{ID: user.ID, UUID: user.UUID, AuthAliases: cloneStringSlice(user.AuthAliases), SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
+ 	}
+ 	return out
+ }
+@@ -270,7 +270,7 @@ func UserSpecsToPanel(users []UserSpec) []panel.User {
+ 	}
+ 	out := make([]panel.User, 0, len(users))
+ 	for _, user := range users {
+-		out = append(out, panel.User{ID: user.ID, UUID: user.UUID, SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
++		out = append(out, panel.User{ID: user.ID, UUID: user.UUID, AuthAliases: cloneStringSlice(user.AuthAliases), SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
+ 	}
+ 	return out
+ }
+diff --git a/internal/model/types.go b/internal/model/types.go
+index 6b6b9ee..ed6898e 100644
+--- a/internal/model/types.go
++++ b/internal/model/types.go
+@@ -80,10 +80,31 @@ type BrutalConfig struct {
+ type UserSpec struct {
+ 	ID          int
+ 	UUID        string
++	AuthAliases []string
+ 	SpeedLimit  int
+ 	DeviceLimit int
+ }
+ 
++func (u UserSpec) AuthUUIDs() []string {
++	seen := make(map[string]struct{}, 1+len(u.AuthAliases))
++	out := make([]string, 0, 1+len(u.AuthAliases))
++	if u.UUID != "" {
++		seen[u.UUID] = struct{}{}
++		out = append(out, u.UUID)
++	}
++	for _, alias := range u.AuthAliases {
++		if alias == "" {
++			continue
++		}
++		if _, ok := seen[alias]; ok {
++			continue
++		}
++		seen[alias] = struct{}{}
++		out = append(out, alias)
++	}
++	return out
++}
++
+ func (n *NodeSpec) GetProxyProtocol() bool {
+ 	if n == nil {
+ 		return false
+diff --git a/internal/panel/types.go b/internal/panel/types.go
+index 14a5cfd..f6766e1 100644
+--- a/internal/panel/types.go
++++ b/internal/panel/types.go
+@@ -71,8 +71,8 @@ type MachineNode struct {
+ 
+ // MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
+ type MachineNodesResponse struct {
+-	Nodes      []MachineNode      `json:"nodes"`
+-	BaseConfig MachineBaseConfig  `json:"base_config"`
++	Nodes      []MachineNode     `json:"nodes"`
++	BaseConfig MachineBaseConfig `json:"base_config"`
+ }
+ 
+ // MachineBaseConfig holds polling intervals for machine mode.
+@@ -253,12 +253,35 @@ type RouteAction struct {
+ 
+ // User represents a user returned by the panel
+ type User struct {
+-	ID          int    `json:"id"`
+-	UUID        string `json:"uuid"`
+-	SpeedLimit  int    `json:"speed_limit"`  // Mbps, 0 = unlimited
+-	DeviceLimit int    `json:"device_limit"` // max devices, 0 = unlimited
++	ID          int      `json:"id"`
++	UUID        string   `json:"uuid"`
++	AuthAliases []string `json:"auth_aliases,omitempty"` // additional UUID/passwords accepted for this user
++	SpeedLimit  int      `json:"speed_limit"`            // Mbps, 0 = unlimited
++	DeviceLimit int      `json:"device_limit"`           // max devices, 0 = unlimited
+ }
+ 
+ type UsersResponse struct {
+ 	Users []User `json:"users"`
+ }
++
++type DevicesResponse struct {
++	Users map[int][]string `json:"users"`
++}
++
++func (d *DevicesResponse) UnmarshalJSON(data []byte) error {
++	type Alias DevicesResponse
++	aux := &struct {
++		Users json.RawMessage `json:"users"`
++		*Alias
++	}{
++		Alias: (*Alias)(d),
++	}
++	if err := json.Unmarshal(data, &aux); err != nil {
++		return err
++	}
++	d.Users = make(map[int][]string)
++	if len(aux.Users) == 0 || string(aux.Users) == "[]" || string(aux.Users) == "null" {
++		return nil
++	}
++	return json.Unmarshal(aux.Users, &d.Users)
++}

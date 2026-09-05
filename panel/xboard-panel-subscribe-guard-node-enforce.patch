@@ -1,0 +1,22 @@
+--- /www/app/Services/ServerService.php.bak-subscribe-guard-node-20260814043350
++++ /www/app/Services/ServerService.php
+@@ -108,6 +108,19 @@
+                 'device_limit'
+             ])
+             ->get();
++
++        // Flyboard 防分享联动：开启订阅防分享时，节点端也按窗口内允许 IP 数
++        // 强制限制同一用户的来源 IP。这样用户复制单个节点链接给别人用，
++        // 即使订阅入口没有再次被请求，xboard-node 也会在连接时拦截超出的设备/IP。
++        if ((int) admin_setting('subscribe_guard_enable', 1) === 1) {
++            $guardLimit = max(1, min((int) admin_setting('subscribe_guard_max_ips', 3), 255));
++            $users = $users->map(function ($user) use ($guardLimit) {
++                $currentLimit = (int) ($user->device_limit ?? 0);
++                $user->device_limit = $currentLimit > 0 ? min($currentLimit, $guardLimit) : $guardLimit;
++                return $user;
++            });
++        }
++
+         return HookManager::filter('server.users.get', $users, $node);
+     }
+ 

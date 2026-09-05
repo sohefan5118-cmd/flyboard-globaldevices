@@ -1,0 +1,173 @@
+--- /www/app/Services/Flyboard/UpstreamSubscribeService.php.bak-nodeguard-20260814042726
++++ /www/app/Services/Flyboard/UpstreamSubscribeService.php
+@@ -21,10 +21,6 @@
+ 
+     public function mergeIntoResponse(Response $response, Request $request, mixed $user): Response
+     {
+-        if (!$this->isEnabled()) {
+-            return $response;
+-        }
+-
+         $localBody = (string) $response->getContent();
+         $localParsed = $this->parseSubscriptionBody($localBody);
+ 
+@@ -33,6 +29,10 @@
+             return $response;
+         }
+ 
++        if (!$this->isEnabled()) {
++            return $this->protectResponseContent($response, $localParsed, $request, $user);
++        }
++
+         $upstream = $this->fetchForUser($request, $user);
+         if (!$upstream['ok']) {
+             $response->headers->set('X-Flyboard-Upstream-Subscribe', 'fetch-failed');
+@@ -46,8 +46,8 @@
+             return $response;
+         }
+ 
+-        $localLines = $this->extractUriLines($localParsed['decoded']);
+-        $upstreamLines = $this->extractUriLines($upstreamParsed['decoded']);
++        $localLines = $this->protectUriLines($this->extractUriLines($localParsed['decoded']), $request, $user, 'local');
++        $upstreamLines = $this->protectUriLines($this->extractUriLines($upstreamParsed['decoded']), $request, $user, 'upstream');
+         $mergedLines = $this->mergeLines($localLines, $upstreamLines);
+ 
+         if (empty($mergedLines)) {
+@@ -64,6 +64,25 @@
+         return $response;
+     }
+ 
++    private function protectResponseContent(Response $response, array $parsed, Request $request, mixed $user): Response
++    {
++        if (!in_array($parsed['format'] ?? 'unknown', ['base64', 'plain'], true)) {
++            return $response;
++        }
++
++        $lines = $this->protectUriLines($this->extractUriLines($parsed['decoded'] ?? ''), $request, $user, 'local');
++        if (empty($lines)) {
++            return $response;
++        }
++
++        $body = implode("\r\n", $lines) . "\r\n";
++        $response->setContent(($parsed['format'] ?? '') === 'base64' ? base64_encode($body) : $body);
++        $response->headers->set('content-type', 'text/plain');
++        $response->headers->set('X-Flyboard-Node-Guard', 'protected');
++
++        return $response;
++    }
++
+     public function preview(Request $request, mixed $user = null): array
+     {
+         $result = $this->fetchForUser($request, $user);
+@@ -225,6 +244,111 @@
+             ->filter(fn($line) => $line !== '' && preg_match(self::URI_PREFIX_PATTERN, $line))
+             ->values()
+             ->all();
++    }
++
++    private function protectUriLines(array $lines, Request $request, mixed $user, string $source): array
++    {
++        if ((int) admin_setting('subscribe_guard_enable', 1) !== 1) {
++            return $lines;
++        }
++
++        return collect($lines)
++            ->values()
++            ->map(fn($line, $index) => $this->protectNodeUri($line, $request, $user, $source, (int) $index + 1))
++            ->all();
++    }
++
++    private function protectNodeUri(string $uri, Request $request, mixed $user, string $source, int $index): string
++    {
++        $scheme = strtolower(strtok($uri, '://') ?: '');
++        $proof = $this->nodeProofParams($request, $user, $source, $index);
++
++        try {
++            if ($scheme === 'vmess') {
++                return $this->protectVmessUri($uri, $proof);
++            }
++
++            if (in_array($scheme, ['ss', 'ssr', 'vless', 'trojan', 'hysteria', 'hysteria2', 'hy2', 'tuic', 'socks', 'socks5', 'http', 'https'], true)) {
++                return $this->appendQueryAndTag($uri, $proof, 'u' . data_get($user, 'id', '0'));
++            }
++        } catch (\Throwable $e) {
++            return $this->appendTag($uri, 'u' . data_get($user, 'id', '0'));
++        }
++
++        return $this->appendTag($uri, 'u' . data_get($user, 'id', '0'));
++    }
++
++    private function nodeProofParams(Request $request, mixed $user, string $source, int $index): array
++    {
++        $userId = (string) data_get($user, 'id', '0');
++        $token = (string) data_get($user, 'token', $request->route('token', ''));
++        $windowHours = max(1, (int) admin_setting('subscribe_guard_window_hours', 24));
++        $expiresAt = time() + ($windowHours * 3600);
++        $clientIp = $request->ip() ?: '';
++        $fingerprint = substr(hash('sha256', $userId . '|' . $token . '|' . $clientIp), 0, 16);
++        $payload = implode('|', [$userId, $fingerprint, $source, $index, $expiresAt]);
++        $signature = substr(hash_hmac('sha256', $payload, (string) config('app.key')), 0, 24);
++
++        return [
++            'fb_uid' => $userId,
++            'fb_fp' => $fingerprint,
++            'fb_src' => $source,
++            'fb_i' => (string) $index,
++            'fb_exp' => (string) $expiresAt,
++            'fb_sig' => $signature,
++        ];
++    }
++
++    private function protectVmessUri(string $uri, array $proof): string
++    {
++        $payload = substr($uri, strlen('vmess://'));
++        $json = base64_decode($this->normalizeBase64($payload), true);
++        if (!is_string($json) || $json === '') {
++            return $this->appendTag($uri, 'u' . ($proof['fb_uid'] ?? '0'));
++        }
++
++        $config = json_decode($json, true);
++        if (!is_array($config)) {
++            return $this->appendTag($uri, 'u' . ($proof['fb_uid'] ?? '0'));
++        }
++
++        $label = (string) ($config['ps'] ?? 'vmess');
++        $config['ps'] = $this->appendLabelMarker($label, 'u' . ($proof['fb_uid'] ?? '0'));
++        foreach ($proof as $key => $value) {
++            $config[$key] = $value;
++        }
++
++        return 'vmess://' . rtrim(base64_encode(json_encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)), '=');
++    }
++
++    private function appendQueryAndTag(string $uri, array $params, string $marker): string
++    {
++        $fragment = '';
++        $base = $uri;
++        if (str_contains($base, '#')) {
++            [$base, $fragment] = explode('#', $base, 2);
++        }
++
++        $separator = str_contains($base, '?') ? '&' : '?';
++        $base .= $separator . http_build_query($params);
++        $label = $fragment !== '' ? rawurldecode($fragment) : 'node';
++        return $base . '#' . rawurlencode($this->appendLabelMarker($label, $marker));
++    }
++
++    private function appendTag(string $uri, string $marker): string
++    {
++        $base = $uri;
++        $fragment = '';
++        if (str_contains($base, '#')) {
++            [$base, $fragment] = explode('#', $base, 2);
++        }
++        $label = $fragment !== '' ? rawurldecode($fragment) : 'node';
++        return $base . '#' . rawurlencode($this->appendLabelMarker($label, $marker));
++    }
++
++    private function appendLabelMarker(string $label, string $marker): string
++    {
++        return str_contains($label, ' | ' . $marker) ? $label : ($label . ' | ' . $marker);
+     }
+ 
+     private function mergeLines(array $localLines, array $upstreamLines): array

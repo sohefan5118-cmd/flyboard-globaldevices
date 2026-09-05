@@ -6,7 +6,7 @@ set -euo pipefail
 # Optional env:
 #   REPO="OWNER/REPO" BRANCH="main" CONTAINER="flyboard-xboard-1" APP_DIR="/www" bash install-panel-machine-devices.sh
 
-REPO="${REPO:-sohefan5118/flyboard-globaldevices}"
+REPO="${REPO:-sohefan5118-cmd/flyboard-globaldevices}"
 BRANCH="${BRANCH:-main}"
 CONTAINER="${CONTAINER:-flyboard-xboard-1}"
 APP_DIR="${APP_DIR:-/www}"

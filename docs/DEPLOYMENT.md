@@ -17,6 +17,12 @@ docker exec flyboard-xboard-1 sh -lc 'cd /www && php artisan route:list --path=a
 3. Run `scripts/install-xboard-node-globaldevices2.sh` on the node host.
 4. Verify version and logs.
 
+Recommended installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
+```
+
 ## Redis keys
 
 - `user_devices:*` = authorized whitelist, clipped by `device_limit`.
