@@ -1,0 +1,21 @@
+name: ${COMPOSE_PROJECT_NAME:-flyboard}
+services:
+  xboard:
+    image: ghcr.io/cedar2025/xboard@sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+    volumes:
+      - ./.env:/www/.env
+      - ./.docker/.data:/www/.docker/.data
+      - ./storage/logs:/www/storage/logs
+      - ./storage/theme:/www/storage/theme
+      - ./plugins:/www/plugins
+      - ./database/migrations/2026_09_18_000001_create_flyboard_tables.php:/www/database/migrations/2026_09_18_000001_create_flyboard_tables.php:ro
+      - ./database/migrations/2026_09_18_000002_expand_flyboard_upstreams.php:/www/database/migrations/2026_09_18_000002_expand_flyboard_upstreams.php:ro
+      - ./database/migrations/2026_09_18_000003_create_flyboard_clients.php:/www/database/migrations/2026_09_18_000003_create_flyboard_clients.php:ro
+      - ./database/migrations/2026_09_18_000004_create_flyboard_main_user_whitelist.php:/www/database/migrations/2026_09_18_000004_create_flyboard_main_user_whitelist.php:ro
+      - redis-data:/data
+    environment:
+      RESOURCE_PROFILE: ${RESOURCE_PROFILE:-balanced}
+      ENABLE_HORIZON: "true"
+      docker: "true"
+volumes:
+  redis-data:

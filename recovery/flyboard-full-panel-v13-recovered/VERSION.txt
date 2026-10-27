@@ -1,0 +1,5 @@
+flyboard-full-panel-v13-recovered
+Source baseline: flyboard-full-panel-a-baseline-v1 (verified archive/tree)
+Applied: v13 owner-lock IP-window hotfix — DeviceStateService.php and ServerService.php
+Owner-lock policy retained: strict IP+UA FlyboardService.php from A baseline (newer/stricter than hotfix package's V20 UA-first implementation)
+Recovery build: 2026-10-27 UTC

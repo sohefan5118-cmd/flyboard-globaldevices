@@ -1,0 +1,73 @@
+name: ${COMPOSE_PROJECT_NAME:-flyboard}
+services:
+  xboard:
+    image: ghcr.io/cedar2025/xboard@sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT:-7001}:7001"
+    volumes:
+      - ./.env:/www/.env
+      - ./.docker/.data:/www/.docker/.data
+      - ./storage/logs:/www/storage/logs
+      - ./storage/theme:/www/storage/theme
+      - ./plugins:/www/plugins
+      - ./database/migrations/2026_09_18_000001_create_flyboard_tables.php:/www/database/migrations/2026_09_18_000001_create_flyboard_tables.php:ro
+      - ./database/migrations/2026_09_18_000002_expand_flyboard_upstreams.php:/www/database/migrations/2026_09_18_000002_expand_flyboard_upstreams.php:ro
+      - ./database/migrations/2026_09_18_000003_create_flyboard_clients.php:/www/database/migrations/2026_09_18_000003_create_flyboard_clients.php:ro
+      - ./database/migrations/2026_09_18_000004_create_flyboard_main_user_whitelist.php:/www/database/migrations/2026_09_18_000004_create_flyboard_main_user_whitelist.php:ro
+      - ./overrides-UniProxyController.php:/www/app/Http/Controllers/V1/Server/UniProxyController.php:ro
+      - ./overrides-ServerRoute.php:/www/app/Http/Routes/V2/ServerRoute.php:ro
+      - ./overrides/DeviceStateService.php:/www/app/Services/DeviceStateService.php:ro
+      - ./overrides/ServerService.php:/www/app/Services/ServerService.php:ro
+      - ./overrides/console-commands/CleanupOnlineStatus.php:/www/app/Console/Commands/CleanupOnlineStatus.php:ro
+      - ./overrides/flyboard-restored/admin.blade.php:/www/resources/views/admin.blade.php:ro
+      - ./overrides/flyboard-restored/flyboard.blade.php:/www/resources/views/flyboard.blade.php:ro
+      - ./overrides/flyboard-restored/web.php:/www/routes/web.php:ro
+      - ./overrides/flyboard-restored/AdminRoute.php:/www/app/Http/Routes/V2/AdminRoute.php:ro
+      - ./overrides/flyboard-restored/Kernel.php:/www/app/Http/Kernel.php:ro
+      - ./overrides/flyboard-restored/Middleware/XBoardPanelWhitelist.php:/www/app/Http/Middleware/XBoardPanelWhitelist.php:ro
+      - ./overrides/flyboard-restored/FlyboardController.php:/www/app/Http/Controllers/V2/Admin/FlyboardController.php:ro
+      - ./overrides/flyboard-restored/UserController.php:/www/app/Http/Controllers/V2/Admin/UserController.php:ro
+      - ./overrides/NodeWorker.php:/www/app/WebSocket/NodeWorker.php:ro
+      - ./overrides/flyboard-restored/NodeEventHandlers.php:/www/app/WebSocket/NodeEventHandlers.php:ro
+      - ./overrides/flyboard-restored/FlyboardService.php:/www/app/Services/FlyboardService.php:ro
+      - ./overrides/flyboard-restored/FlyboardClientService.php:/www/app/Services/FlyboardClientService.php:ro
+      - ./overrides/flyboard-restored/FlyboardUpstreamFetcher.php:/www/app/Services/FlyboardUpstreamFetcher.php:ro
+      - ./overrides/flyboard-restored/FlyboardPullJob.php:/www/app/Services/FlyboardPullJob.php:ro
+      - ./overrides/flyboard-restored/FlyboardTransport.php:/www/app/Services/FlyboardTransport.php:ro
+      - ./overrides/flyboard-restored/FlyboardClientController.php:/www/app/Http/Controllers/V1/Client/FlyboardClientController.php:ro
+      - ./overrides/flyboard-restored/ClientController.php:/www/app/Http/Controllers/V1/Client/ClientController.php:ro
+      - ./overrides/flyboard-restored/User/ServerController.php:/www/app/Http/Controllers/V1/User/ServerController.php:ro
+      - ./overrides/flyboard-restored/Client/AppController.php:/www/app/Http/Controllers/V1/Client/AppController.php:ro
+      - ./overrides/flyboard-restored/horizon.php:/www/config/horizon.php:ro
+      - ./overrides/flyboard-restored/flyboard.php:/www/config/flyboard.php:ro
+      - redis-data:/data
+    environment:
+      RESOURCE_PROFILE: ${RESOURCE_PROFILE:-balanced}
+      ENABLE_HORIZON: "true"
+      docker: "true"
+  scheduler:
+    image: ghcr.io/cedar2025/xboard@sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+    restart: unless-stopped
+    user: "1000:1000"
+    entrypoint: ["/bin/sh", "-c", "until [ -S /data/redis.sock ]; do sleep 1; done; exec php /www/artisan schedule:work"]
+    depends_on:
+      - xboard
+    volumes:
+      - ./.env:/www/.env:ro
+      - ./.docker/.data:/www/.docker/.data
+      - ./storage/logs:/www/storage/logs
+      - ./storage/theme:/www/storage/theme
+      - ./plugins:/www/plugins
+      - ./overrides/DeviceStateService.php:/www/app/Services/DeviceStateService.php:ro
+      - ./overrides/ServerService.php:/www/app/Services/ServerService.php:ro
+      - ./overrides/console-commands/CleanupOnlineStatus.php:/www/app/Console/Commands/CleanupOnlineStatus.php:ro
+      - ./overrides/flyboard-restored/FlyboardService.php:/www/app/Services/FlyboardService.php:ro
+      - ./overrides/flyboard-restored/horizon.php:/www/config/horizon.php:ro
+      - redis-data:/data
+    environment:
+      RESOURCE_PROFILE: ${RESOURCE_PROFILE:-balanced}
+      ENABLE_HORIZON: "false"
+      docker: "true"
+volumes:
+  redis-data:
