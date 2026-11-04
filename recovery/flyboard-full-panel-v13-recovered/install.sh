@@ -49,7 +49,7 @@ mkdir -p "$INSTALL_DIR"; CREATED_DIR=1
 if docker ps -a --format '{{.Label "com.docker.compose.project"}}' | grep -Fxq "$PROJECT_NAME"; then
   die "Compose 项目名已存在：$PROJECT_NAME"
 fi
-if command -v ss >/dev/null 2>&1 && ss -Hln "sport = :$PANEL_PORT" 2>/dev/null | grep -q .; then
+if command -v ss >/dev/null 2>&1 && ss -Hlnt "sport = :$PANEL_PORT" 2>/dev/null | grep -q .; then
   die "端口已被占用：$PANEL_PORT"
 fi
 
@@ -61,8 +61,12 @@ touch "$INSTALL_DIR/.docker/.data/database.sqlite"
 chmod 600 "$INSTALL_DIR/.env" "$INSTALL_DIR/.docker/.data/database.sqlite"
 
 cd "$INSTALL_DIR"
-say "拉取固定镜像 digest"
-docker pull "$IMAGE"
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  say "检测到本机已有固定镜像，跳过远程拉取（支持离线安装）"
+else
+  say "本机没有固定镜像，尝试从官方 GHCR 拉取"
+  docker pull "$IMAGE" || die "镜像拉取失败。若官方镜像已删除，请先下载离线镜像归档并执行：gzip -dc xboard-896e4926-linux-amd64.tar.gz | docker load"
+fi
 actual_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
 [[ "$actual_id" == 'sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676' ]] || die "镜像 ID 不匹配：$actual_id"
 

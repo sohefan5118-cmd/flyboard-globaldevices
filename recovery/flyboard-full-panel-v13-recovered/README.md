@@ -67,3 +67,27 @@ docker compose restart
 刻意保留基线中更新、更严格的 `FlyboardService.php`（IP+UA owner fingerprint），未用 hotfix 包中的较早 V20 UA-first 文件覆盖；真实 `/s/{token}` 两个入口控制器本来就与 hotfix 字节一致。
 
 这只是离线恢复候选，未部署、未启动容器、未操作数据库。详见同级 `RECOVERY-AUDIT.md`。
+
+
+## 官方仓库或镜像被删除后的离线恢复
+
+本安装包的 GitHub Release 同时保存固定 XBoard 镜像：
+
+- `xboard-896e4926-linux-amd64.tar.gz`
+- `xboard-896e4926-linux-amd64.tar.gz.sha256`
+
+先验证并载入镜像（不会启动服务）：
+
+```bash
+sha256sum -c xboard-896e4926-linux-amd64.tar.gz.sha256
+gzip -dc xboard-896e4926-linux-amd64.tar.gz | sudo docker load
+sudo docker image inspect 'ghcr.io/cedar2025/xboard@sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676' --format '{{.Id}}'
+```
+
+预期镜像 ID：
+
+```text
+sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+```
+
+之后正常运行 `install.sh`。安装器检测到本机固定镜像后会跳过网络拉取，因此不再依赖官方 GitHub 仓库或官方 GHCR 镜像仍然存在。
