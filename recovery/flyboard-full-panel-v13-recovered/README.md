@@ -54,7 +54,7 @@ docker compose restart
 - v13 核心来自 A 基线；`DeviceStateService.php` 与 `ServerService.php` 已合入后续 IP-window hotfix，`NodeWorker.php` 与 `NodeEventHandlers.php` 保持 A/v13 共同哈希
 - 严格 Owner Lock `FlyboardService.php` 与 A 哈希一致
 - 自有公开镜像：`ghcr.io/sohefan5118-cmd/xboard:896e4926`
-- 安装器强制校验镜像 ID：`sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676`
+- 安装器强制校验已登记的镜像内容 ID 或自有 GHCR manifest digest；兼容传统 Docker 镜像存储和 Docker 29/containerd 镜像存储。
 
 外部 `xboard-node` 是独立组件，不在此面板包中；节点配置、ID、密钥必须在新节点上独立配置。
 
@@ -85,10 +85,12 @@ gzip -dc xboard-896e4926-linux-amd64.tar.gz | sudo docker load
 sudo docker image inspect 'ghcr.io/sohefan5118-cmd/xboard:896e4926' --format '{{.Id}}'
 ```
 
-预期镜像 ID：
+不同 Docker 镜像存储可能显示以下任一已登记身份：
 
 ```text
 sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+sha256:3a432c8e3fd243f70afd885e3d4898343d0371971007def6c5f8e7b46991c0cf
+sha256:8cc12dc32065e251987786b9b1abffa1014783e82a62d83548413f78395169e1
 ```
 
 之后正常运行 `install.sh`。安装器在线时从自有公开 GHCR 拉取；检测到本机固定镜像后会跳过网络拉取，因此不再依赖官方 GitHub 仓库或官方 GHCR 镜像仍然存在。

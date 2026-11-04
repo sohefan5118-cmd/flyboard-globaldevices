@@ -10,6 +10,12 @@ ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 PUBLIC_URL="${PUBLIC_URL:-}"
 PANEL_WHITELIST="${PANEL_WHITELIST:-}"
 IMAGE='ghcr.io/sohefan5118-cmd/xboard:896e4926'
+EXPECTED_IMAGE_IDS=(
+  'sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676'
+  'sha256:3a432c8e3fd243f70afd885e3d4898343d0371971007def6c5f8e7b46991c0cf'
+  'sha256:8cc12dc32065e251987786b9b1abffa1014783e82a62d83548413f78395169e1'
+)
+EXPECTED_REPO_DIGEST='ghcr.io/sohefan5118-cmd/xboard@sha256:3a432c8e3fd243f70afd885e3d4898343d0371971007def6c5f8e7b46991c0cf'
 CREATED_DIR=0
 INSTALLED_OK=0
 
@@ -68,7 +74,19 @@ else
   docker pull "$IMAGE" || die "镜像拉取失败。请先下载离线镜像归档并执行：gzip -dc xboard-896e4926-linux-amd64.tar.gz | docker load"
 fi
 actual_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
-[[ "$actual_id" == 'sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676' ]] || die "镜像 ID 不匹配：$actual_id"
+repo_digests="$(docker image inspect "$IMAGE" --format '{{join .RepoDigests "\n"}}')"
+image_verified=0
+for expected_id in "${EXPECTED_IMAGE_IDS[@]}"; do
+  if [[ "$actual_id" == "$expected_id" ]]; then
+    image_verified=1
+    break
+  fi
+done
+if grep -Fxq "$EXPECTED_REPO_DIGEST" <<<"$repo_digests"; then
+  image_verified=1
+fi
+(( image_verified == 1 )) || die "镜像身份不匹配：ID=$actual_id"
+say "固定镜像身份校验通过：$actual_id"
 
 say "初始化全新 SQLite、APP_KEY、Redis 配置和管理员"
 install_log="$INSTALL_DIR/install-result.txt"

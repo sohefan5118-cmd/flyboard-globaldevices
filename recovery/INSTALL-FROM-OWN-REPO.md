@@ -59,7 +59,7 @@ flyboard-full-panel-v13-recovered.tar.gz: OK
 安装包 SHA-256：
 
 ```text
-c343960d617ac87200ad4202d65e7081e5acefdcaba955119a392ec0d0bed5aa
+d25026db90c20799e61ed0222f7a4eb3a4b8bb5a35ed62e81a4c658ddb819df4
 ```
 
 ## 三、安装前验证
@@ -107,10 +107,12 @@ sudo env \
 ghcr.io/sohefan5118-cmd/xboard:896e4926
 ```
 
-并强制校验 Docker 镜像 ID：
+并强制校验已登记的镜像身份。不同 Docker 镜像存储可能显示以下任一值：
 
 ```text
 sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+sha256:3a432c8e3fd243f70afd885e3d4898343d0371971007def6c5f8e7b46991c0cf
+sha256:8cc12dc32065e251987786b9b1abffa1014783e82a62d83548413f78395169e1
 ```
 
 镜像内容不一致时，安装器会立即停止。
@@ -139,7 +141,7 @@ sudo docker compose exec -T xboard php /www/artisan schedule:list | grep 'cleanu
 
 - `xboard` 和 `scheduler` 均为 `Up`。
 - 两个容器的镜像都是 `ghcr.io/sohefan5118-cmd/xboard:896e4926`。
-- 两个容器的镜像 ID 都是 `sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676`。
+- 两个容器使用同一个已登记镜像身份；Docker 29/containerd 通常显示 `sha256:3a432c8e3fd243f70afd885e3d4898343d0371971007def6c5f8e7b46991c0cf`，传统 Docker 镜像存储通常显示 `sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676`。
 - HTTP 状态为 `200`、`301`、`302`、`401` 或 `403`。
 - Redis 返回 `PONG`。
 - Horizon 显示 `Horizon is running`。

@@ -6,3 +6,4 @@ Recovery build: 2026-10-27 UTC
 Offline recovery: supports preloaded pinned XBoard image
 Port check: TCP-only to avoid Unix socket inode false positives
 Registry: public ghcr.io/sohefan5118-cmd/xboard:896e4926 with image ID verification
+Compatibility: Docker 29/containerd manifest-digest image identity

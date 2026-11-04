@@ -1,7 +1,7 @@
 c639b808c5d67378650d6404473ee0f716b79c4bfa1416608467bf731a077b33  ./PAYLOAD-SHA256SUMS
-4b2ba7e3239380696e6ebdda7a4dbc9ae71474110cea5e5810788aa19c8e44a7  ./README.md
-b0ae7c5698225fafb5a26290ec1e481c30280eac871e5db723e9b3d87a246ebf  ./VERSION.txt
-4ab44f56d4b478e9004ce8895bd1bfaa7f476aeb35af1acdac62fc05cd689fd8  ./install.sh
+9f7c9b575487604b7e4b8b7defd54849afd372948665b9d1055bbb9a6a19e890  ./README.md
+ee2cdc26a659aec5658824dcff0185e02de1badba97381a1c9bf3bb9ba5c3683  ./VERSION.txt
+ec6db629cca963e6b816784af0dcd0f4c859c7e6df0a5c8cdff61aa217159a02  ./install.sh
 d126fcacbeb1be0c9cca35645d58239fd920666599a02af5dcb0d2c8cfa5e848  ./payload/.env.install
 2aab527cbeef37c82800cdabb447aff546a983b0900a706f6943293df5542761  ./payload/compose.bootstrap.yaml
 be5c495da4c9be9a12f0fa00ebf727bbecfaccb6cfd1cb02d942ee85f1c49cd1  ./payload/compose.yaml
