@@ -9,7 +9,7 @@ PROJECT_NAME="${PROJECT_NAME:-flyboard}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 PUBLIC_URL="${PUBLIC_URL:-}"
 PANEL_WHITELIST="${PANEL_WHITELIST:-}"
-IMAGE='ghcr.io/cedar2025/xboard@sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676'
+IMAGE='ghcr.io/sohefan5118-cmd/xboard:896e4926'
 CREATED_DIR=0
 INSTALLED_OK=0
 
@@ -64,8 +64,8 @@ cd "$INSTALL_DIR"
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
   say "检测到本机已有固定镜像，跳过远程拉取（支持离线安装）"
 else
-  say "本机没有固定镜像，尝试从官方 GHCR 拉取"
-  docker pull "$IMAGE" || die "镜像拉取失败。若官方镜像已删除，请先下载离线镜像归档并执行：gzip -dc xboard-896e4926-linux-amd64.tar.gz | docker load"
+  say "本机没有固定镜像，从自有 GHCR 备份拉取"
+  docker pull "$IMAGE" || die "镜像拉取失败。请先下载离线镜像归档并执行：gzip -dc xboard-896e4926-linux-amd64.tar.gz | docker load"
 fi
 actual_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
 [[ "$actual_id" == 'sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676' ]] || die "镜像 ID 不匹配：$actual_id"

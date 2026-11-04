@@ -1,7 +1,7 @@
 name: ${COMPOSE_PROJECT_NAME:-flyboard}
 services:
   xboard:
-    image: ghcr.io/cedar2025/xboard@sha256:896e4926e0d7f18d223d58770590c74ab6f05ecb21f1b74ef5357ed20f44c676
+    image: ghcr.io/sohefan5118-cmd/xboard:896e4926
     volumes:
       - ./.env:/www/.env
       - ./.docker/.data:/www/.docker/.data
