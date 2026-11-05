@@ -7,6 +7,43 @@
 
 安装过程不访问原版 XBoard GitHub 仓库或原版 XBoard GHCR。
 
+## 一键安装入口
+
+原来的分步安装方法仍然保留，适合需要逐项检查的场景。新服务器也可以使用下面的一键入口；它会自动串联环境检查、Docker 安装、固定 Release 下载、外层 SHA-256 校验、安装包内部校验、原版引用审计，并最终调用同一个正式 `install.sh`。
+
+一键脚本只支持 Ubuntu/Debian 的 `apt-get` 和 `x86_64/amd64`，并且不会覆盖已存在的 `/opt/flyboard` 或占用中的 TCP `7001`。
+
+先只读检查服务器架构和目标目录：
+
+```bash
+uname -m
+test ! -e /opt/flyboard && echo "通过：安装目录不存在" || echo "停止：/opt/flyboard 已存在"
+```
+
+确认无误后，下面命令会真正修改服务器并开始安装。执行过程中需要输入真实管理员邮箱和公网 URL：
+
+```bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/recovery/install-one-click.sh' \
+  | bash
+```
+
+脚本默认使用 `/opt/flyboard`、TCP `7001` 和 Compose 项目名 `flyboard`。如需自定义，可在命令前设置变量：
+
+```bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/recovery/install-one-click.sh' \
+  -o /tmp/flyboard-install-one-click.sh
+env \
+  INSTALL_DIR='/opt/flyboard-2' \
+  PANEL_PORT='7002' \
+  PROJECT_NAME='flyboard_2' \
+  bash /tmp/flyboard-install-one-click.sh
+rm -f /tmp/flyboard-install-one-click.sh
+```
+
+一键脚本下载的仍是本 Release 的固定安装包，并最终调用其中经过校验的正式安装器；离线导入镜像、旧的手动分步安装和安装后验证方法见下文，均未删除。
+
 ## 一、只读检查
 
 以下命令不会修改服务器：

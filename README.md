@@ -69,6 +69,24 @@ curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevi
 
 默认容器名：`flyboard-xboard-1`，默认应用目录：`/www`。
 
+## Flyboard 面板一键安装
+
+完整分步教程仍保留在：
+
+```text
+recovery/INSTALL-FROM-OWN-REPO.md
+```
+
+全新 Ubuntu/Debian x86_64 服务器可以使用自有仓库中的一键入口：
+
+```bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/recovery/install-one-click.sh' \
+  | bash
+```
+
+一键入口会自动完成 Docker/Compose 检查与安装、固定 Release 下载、SHA-256 校验、内部清单校验、原版引用审计，然后调用原有正式安装器。它不会覆盖已存在的 `/opt/flyboard`，原来的手动安装方法不受影响。
+
 如果容器名不同：
 
 ```bash
