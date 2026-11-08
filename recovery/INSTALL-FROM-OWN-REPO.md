@@ -212,6 +212,55 @@ curl -fsSL \
 
 机器 Token 属于凭据，不要发到聊天或提交到仓库。Token 暴露后必须先在后台重置，再使用新命令。
 
+## 七、修复已经安装的面板
+
+本节只适用于已经通过旧 `own-node` 包安装、后台仍生成 `a706b00.../install.sh` 命令的面板。它只替换机器安装命令控制器并重建面板容器，不删除面板目录、SQLite、Redis 卷或节点服务。
+
+### 只读检查
+
+```bash
+cd /opt/flyboard-57249
+grep -n 'MachineController.php' compose.yaml
+grep -n 'a706b00\|09cf31b' overrides/flyboard-restored/MachineController.php
+docker compose ps
+```
+
+第一条必须能看到 `MachineController.php` 的只读挂载。若看不到，不要执行后续命令，应先把 `compose.yaml` 更新到本 Release 中的版本。
+
+### 真正执行（会修改并重建面板容器）
+
+```bash
+cd /opt/flyboard-57249
+
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/recovery/flyboard-full-panel-v13-recovered/payload/overrides/flyboard-restored/MachineController.php' \
+  -o /tmp/MachineController.php
+
+printf '%s  %s\n' \
+  'acd768d9a07bd56158c0554427b06195da76f111d88c0da2bf3eac621a7f7a8a' \
+  '/tmp/MachineController.php' \
+  | sha256sum -c -
+
+sudo install -m 0644 \
+  /tmp/MachineController.php \
+  overrides/flyboard-restored/MachineController.php
+
+docker compose up -d xboard
+```
+
+### 验证
+
+```bash
+cd /opt/flyboard-57249
+grep -n '09cf31b62d667bbfc55124f5d691a571c090f8c7' \
+  overrides/flyboard-restored/MachineController.php
+docker compose ps xboard
+docker compose exec xboard php -l \
+  /www/app/Http/Controllers/V2/Admin/Server/MachineController.php
+```
+
+验证通过后，在面板后台重置已经暴露的机器 Token，再复制新生成的节点命令。新命令必须包含固定提交 `09cf31b62d667bbfc55124f5d691a571c090f8c7`，不能再包含 `a706b00`。
+
 管理员地址和初始随机密码位置：
 
 ```bash
@@ -221,7 +270,7 @@ sudo cat /opt/flyboard/install-result.txt
 
 首次登录后立即修改管理员密码。
 
-## 七、完全离线安装
+## 八、完全离线安装
 
 如果 GHCR 无法访问，可以从同一个自有 Release 下载离线镜像：
 
@@ -251,7 +300,7 @@ sudo docker image inspect 'ghcr.io/sohefan5118-cmd/xboard:896e4926' \
 
 载入镜像后，再按第四节运行安装器。安装器会检测本机已有固定镜像并跳过远程拉取。
 
-## 八、已完成的实装测试
+## 九、已完成的实装测试
 
 2026-11-04 使用 Release 中实际下载的安装包完成了隔离新装测试：
 
