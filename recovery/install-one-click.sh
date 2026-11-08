@@ -4,9 +4,9 @@ umask 077
 
 REPO="${REPO:-sohefan5118-cmd/flyboard-globaldevices}"
 RELEASE_TAG="${RELEASE_TAG:-flyboard-recovery-v13-offline-20261104}"
-PACKAGE_NAME="flyboard-full-panel-v13-recovered.tar.gz"
-PACKAGE_SHA256="d25026db90c20799e61ed0222f7a4eb3a4b8bb5a35ed62e81a4c658ddb819df4"
-PACKAGE_ASSET_ID="709203496"
+PACKAGE_NAME="flyboard-full-panel-v13-own-node.tar.gz"
+PACKAGE_SHA256="c5486a1a72d874b5424c60a34a2a492edfc6eddf6076f60fc9539bd73a0f0011"
+PACKAGE_ASSET_ID="723724777"
 IMAGE="ghcr.io/sohefan5118-cmd/xboard:896e4926"
 INSTALL_DIR="${INSTALL_DIR:-/opt/flyboard}"
 PANEL_PORT="${PANEL_PORT:-7001}"
