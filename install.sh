@@ -29,6 +29,10 @@ fi
 docker compose up -d postgres valkey
 docker compose run --rm migrate migrate up
 
+# Keep first-install compilation gentle on small servers.
+docker compose build panel
+docker compose build worker
+docker compose build scheduler
 docker compose up -d panel worker scheduler
 for _ in $(seq 1 90); do curl -fsS "http://127.0.0.1:${FLYBOARD_PORT}/health/ready" >/dev/null && ready=1 && break; sleep 2; done
 [[ "${ready:-}" == 1 ]] || { docker compose ps >&2; echo "Flyboard failed readiness" >&2; exit 1; }
