@@ -6,6 +6,7 @@ REPO="${REPO:-sohefan5118-cmd/flyboard-globaldevices}"
 RELEASE_TAG="${RELEASE_TAG:-flyboard-recovery-v13-offline-20261104}"
 PACKAGE_NAME="flyboard-full-panel-v13-recovered.tar.gz"
 PACKAGE_SHA256="d25026db90c20799e61ed0222f7a4eb3a4b8bb5a35ed62e81a4c658ddb819df4"
+PACKAGE_ASSET_ID="709203496"
 IMAGE="ghcr.io/sohefan5118-cmd/xboard:896e4926"
 INSTALL_DIR="${INSTALL_DIR:-/opt/flyboard}"
 PANEL_PORT="${PANEL_PORT:-7001}"
@@ -68,13 +69,17 @@ fi
 mkdir -p -- "$DOWNLOAD_ROOT"
 WORK_DIR="$(mktemp -d "$DOWNLOAD_ROOT/.flyboard-one-click.XXXXXX")"
 ARCHIVE_URL="https://github.com/$REPO/releases/download/$RELEASE_TAG/$PACKAGE_NAME"
-CHECKSUM_URL="$ARCHIVE_URL.sha256"
+ARCHIVE_API_URL="https://api.github.com/repos/$REPO/releases/assets/$PACKAGE_ASSET_ID"
 ARCHIVE="$WORK_DIR/$PACKAGE_NAME"
-CHECKSUM="$WORK_DIR/$PACKAGE_NAME.sha256"
 
 say "从自有 GitHub Release 下载固定安装包"
-curl -fL --retry 3 --retry-all-errors -o "$ARCHIVE" "$ARCHIVE_URL"
-curl -fL --retry 3 --retry-all-errors -o "$CHECKSUM" "$CHECKSUM_URL"
+if ! curl -fL --retry 3 --retry-all-errors -o "$ARCHIVE" "$ARCHIVE_URL"; then
+  say "Release 下载链路不可用，切换到 GitHub Release Asset API"
+  curl -fL --retry 3 --retry-all-errors \
+    -H 'Accept: application/octet-stream' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -o "$ARCHIVE" "$ARCHIVE_API_URL"
+fi
 printf '%s  %s\n' "$PACKAGE_SHA256" "$ARCHIVE" | sha256sum -c -
 
 say "解压并验证安装包内部清单"
