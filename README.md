@@ -83,11 +83,11 @@ Unit tests cover URL/IP policy, mixed DNS, parsing, encryption, device leases, r
 
 The panel exposes authenticated HTTP `/api/v1/node/devices` and WebSocket `/api/v1/node/ws`; see `docs/protocol/node-control-v1.md` and `protocol/schema/envelope-v1.json`. Node tokens are shown only at registration. The optional `node-agent` exposes local pre-forward `POST /v1/admit`; new devices fail closed during control outages while previously verified leases remain valid until their signed lease deadline. Configure `AGENT_LOCAL_TOKEN` for the local apply endpoint.
 
-Device and subscription ownership state is atomic across replicas (PostgreSQL advisory transaction locks for Owner Lock, Valkey Lua for global devices). Scheduler prunes leases every 10 seconds and writes PostgreSQL projections/outbox records. Outbox delivery is at least once and consumers must apply monotonic revisions idempotently.
+Device and subscription ownership state is atomic across replicas (PostgreSQL advisory transaction locks for Owner Lock, Valkey Lua for global devices). Positive device/alive reports renew a lease; traffic and empty snapshots do not. The `device_window_minutes` setting defaults to 2 and accepts 1 through 5 minutes; admission and the scheduler read the same live setting. `DEVICE_WINDOW=2m` is the bounded startup fallback. The scheduler prunes leases every 10 seconds and writes PostgreSQL projections/outbox records. Outbox delivery is at least once and consumers must apply monotonic revisions idempotently.
 
 ## Phase 4 operations
 
-The node agent actively dials `PANEL_WS_URL` using `NODE_ID`/`NODE_TOKEN`, authenticates within the protocol deadline, replies to pings, exponentially reconnects (capped at 30s), and atomically persists monotonic revisions plus last-valid admission leases at `AGENT_STATE`. A restart restores those leases; new devices remain fail-closed while disconnected.
+The node agent actively dials `PANEL_WS_URL` using `NODE_ID`/`NODE_TOKEN`, authenticates within the protocol deadline, replies to pings, exponentially reconnects (capped at 30s), and atomically persists monotonic revisions plus the server-provided `lease_until` admission deadlines at `AGENT_STATE`. A restart restores those leases; new devices remain fail-closed while disconnected. Older snapshots without `lease_until` use the bounded 2-minute compatibility fallback.
 
 Administrator `POST /api/v2/$ADMIN_PATH/flyboard/users/{id}/devices/clear` requires the normal session, CSRF header, and Origin. It clears only that user's device state, projection, and count, writes an audit row/outbox revision, and immediately fans out an empty snapshot. Owner migration releases only slots matching the old owner IP.
 

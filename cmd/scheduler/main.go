@@ -32,16 +32,17 @@ func main() {
 	defer t.Stop()
 	for range t.C {
 		ctx := context.Background()
+		deviceWindow := devices.ConfiguredWindow(ctx, s.DB, c.DeviceWindow)
 		if _, e = pull.Reap(ctx, s.DB); e != nil {
 			log.Printf("reap: %v", e)
 		}
-		ids, e := v.Prune(ctx, 120*time.Second, time.Now())
+		ids, e := v.Prune(ctx, deviceWindow, time.Now())
 		if e != nil {
 			log.Printf("prune: %v", e)
 			continue
 		}
 		for _, u := range ids {
-			snap, e := v.Snapshot(ctx, u, 120*time.Second, time.Now())
+			snap, e := v.Snapshot(ctx, u, deviceWindow, time.Now())
 			if e != nil {
 				continue
 			}

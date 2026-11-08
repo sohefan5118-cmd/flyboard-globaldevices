@@ -1,4 +1,4 @@
-# Flyboard RC1 详细安装与运维教程
+# Flyboard RC2 详细安装与运维教程
 
 > 状态说明：这是独立 clean-room 实现的发布候选版，不依赖 Xboard/V2Board 源码、镜像或安装命令。核心自动化与真实 PostgreSQL/Valkey 集成测试已通过；仍需在你的全新服务器完成最终黑盒验收后才能标记正式版。
 
@@ -20,26 +20,26 @@
 
 把以下两个文件上传到新服务器同一目录：
 
-- `flyboard-rc1.tar.gz`
-- `flyboard-rc1.tar.gz.sha256`
+- `flyboard-rc2.tar.gz`
+- `flyboard-rc2.tar.gz.sha256`
 
 进入文件所在目录：
 
 ```bash
 cd /root
-sha256sum -c flyboard-rc1.tar.gz.sha256
+sha256sum -c flyboard-rc2.tar.gz.sha256
 ```
 
 预期看到：
 
 ```text
-flyboard-rc1.tar.gz: OK
+flyboard-rc2.tar.gz: OK
 ```
 
 查看压缩包内容（不会修改系统）：
 
 ```bash
-tar -tzf flyboard-rc1.tar.gz | head -50
+tar -tzf flyboard-rc2.tar.gz | head -50
 ```
 
 ---
@@ -103,7 +103,7 @@ sudo usermod -aG docker "$USER"
 
 ```bash
 sudo mkdir -p /opt/flyboard
-sudo tar -xzf /root/flyboard-rc1.tar.gz -C /opt/flyboard
+sudo tar -xzf /root/flyboard-rc2.tar.gz -C /opt/flyboard
 cd /opt/flyboard
 sudo chown -R root:root /opt/flyboard
 sudo chmod 755 /opt/flyboard
@@ -355,6 +355,18 @@ curl -fsS https://panel.example.com/health/ready && echo
 7. 创建独立客户端，验证额度、过期时间和设备窗口。
 8. 添加测试节点并保存只显示一次的节点 Token。
 
+### 设备离线释放时间
+
+后台进入“设置”，使用“设备离线释放时间（分钟）”调整全局设备租约窗口：
+
+- 默认值：`2` 分钟
+- 可选范围：整数 `1` 至 `5` 分钟
+- 保存后无需重启，面板准入和 scheduler 会读取同一个设置
+- 正向设备/alive 上报会续租；流量上报和空快照不会续租
+- 设备停止正向上报后，到达窗口并经过最多约 10 秒的 scheduler 周期，在线数会释放并同步到数据库投影
+
+值越小，离线设备释放越快，但节点短暂抖动时更容易被判定离线。建议先使用默认 `2` 分钟。
+
 不要把订阅 Token、节点 Token、管理员路径或 `secrets/` 内容发到公开群组。
 
 ---
@@ -555,7 +567,7 @@ sudo cat /opt/flyboard/secrets/admin_path
 
 ### 忘记管理员密码
 
-安装密码只显示一次，不能从 secrets 中找回。当前 RC1 不建议直接修改数据库；请在验收前妥善保存密码。若全新测试安装尚无数据，可 purge 后重新安装。
+安装密码只显示一次，不能从 secrets 中找回。当前 RC2 不建议直接修改数据库；请在验收前妥善保存密码。若全新测试安装尚无数据，可 purge 后重新安装。
 
 ### 查看迁移状态和 doctor
 

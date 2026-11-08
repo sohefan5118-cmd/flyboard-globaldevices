@@ -11,18 +11,24 @@ import (
 
 type Config struct {
 	DatabaseURL, ValkeyURL, Listen, AdminPath, BootstrapToken, CookieSecure, MasterKeyFile string
-	SessionTTL                                                                             time.Duration
+	SessionTTL, DeviceWindow                                                               time.Duration
 	LoginRate, SubscriptionRate, NodeRate, AdminRate                                       int64
 	RateWindow                                                                             time.Duration
 }
 
 func Load() (Config, error) {
-	c := Config{DatabaseURL: secret("DATABASE_URL"), ValkeyURL: secretDefault("VALKEY_URL", "redis://valkey:6379/0"), Listen: get("LISTEN_ADDR", ":8080"), AdminPath: strings.Trim(secret("ADMIN_PATH"), "/"), BootstrapToken: secret("BOOTSTRAP_TOKEN"), CookieSecure: get("COOKIE_SECURE", "true"), MasterKeyFile: get("MASTER_KEY_FILE", "secrets/master_key"), SessionTTL: 24 * time.Hour, LoginRate: integer("LOGIN_RATE_LIMIT", 10), SubscriptionRate: integer("SUBSCRIPTION_RATE_LIMIT", 120), NodeRate: integer("NODE_RATE_LIMIT", 300), AdminRate: integer("ADMIN_RATE_LIMIT", 600), RateWindow: duration("RATE_LIMIT_WINDOW", time.Minute)}
+	c := Config{DatabaseURL: secret("DATABASE_URL"), ValkeyURL: secretDefault("VALKEY_URL", "redis://valkey:6379/0"), Listen: get("LISTEN_ADDR", ":8080"), AdminPath: strings.Trim(secret("ADMIN_PATH"), "/"), BootstrapToken: secret("BOOTSTRAP_TOKEN"), CookieSecure: get("COOKIE_SECURE", "true"), MasterKeyFile: get("MASTER_KEY_FILE", "secrets/master_key"), SessionTTL: 24 * time.Hour, DeviceWindow: duration("DEVICE_WINDOW", 2*time.Minute), LoginRate: integer("LOGIN_RATE_LIMIT", 10), SubscriptionRate: integer("SUBSCRIPTION_RATE_LIMIT", 120), NodeRate: integer("NODE_RATE_LIMIT", 300), AdminRate: integer("ADMIN_RATE_LIMIT", 600), RateWindow: duration("RATE_LIMIT_WINDOW", time.Minute)}
 	if c.DatabaseURL == "" {
 		return c, errors.New("DATABASE_URL required")
 	}
 	if len(c.AdminPath) < 16 {
 		return c, errors.New("ADMIN_PATH must be at least 16 characters")
+	}
+	if c.DeviceWindow < time.Minute {
+		return c, errors.New("DEVICE_WINDOW must be at least 1m")
+	}
+	if c.DeviceWindow > 5*time.Minute {
+		return c, errors.New("DEVICE_WINDOW must not exceed 5m")
 	}
 	return c, nil
 }

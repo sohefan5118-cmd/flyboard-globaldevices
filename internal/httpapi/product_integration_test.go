@@ -22,6 +22,7 @@ import (
 
 	"flyboard/internal/auth"
 	"flyboard/internal/config"
+	"flyboard/internal/devices"
 	"flyboard/internal/migrations"
 	"flyboard/internal/store"
 	"github.com/coder/websocket"
@@ -47,8 +48,12 @@ func TestProductAPIRealServices(t *testing.T) {
 	}
 	// Assert every shipped migration actually ran.
 	vers, err := migrations.Status(ctx, s.DB)
-	if err != nil || len(vers) != 4 {
+	if err != nil || len(vers) != 5 {
 		t.Fatalf("migrations=%v err=%v", vers, err)
+	}
+	var deviceWindow int
+	if err = s.DB.QueryRow(`select (value #>> '{}')::int from settings where key='device_window_minutes'`).Scan(&deviceWindow); err != nil || deviceWindow != 2 {
+		t.Fatalf("default device window=%d err=%v", deviceWindow, err)
 	}
 	op, _ := redis.ParseURL(vr)
 	rv := redis.NewClient(op)
@@ -117,6 +122,21 @@ func TestProductAPIRealServices(t *testing.T) {
 	json.Unmarshal(b, &lr)
 	if lr.CSRF == "" {
 		t.Fatal("missing csrf")
+	}
+	for _, invalid := range []any{0, 6, 1.5, "2"} {
+		status, _, b = call("POST", base+"settings", map[string]any{"key": "device_window_minutes", "value": invalid}, lr.CSRF, ts.URL)
+		if status != 422 {
+			t.Fatalf("invalid device window %v=%d %s", invalid, status, b)
+		}
+	}
+	for _, valid := range []int{1, 5, 2} {
+		status, _, b = call("POST", base+"settings", map[string]any{"key": "device_window_minutes", "value": valid}, lr.CSRF, ts.URL)
+		if status != 200 {
+			t.Fatalf("valid device window %d=%d %s", valid, status, b)
+		}
+		if got := devices.ConfiguredWindow(ctx, s.DB, time.Minute); got != time.Duration(valid)*time.Minute {
+			t.Fatalf("configured device window=%s want=%dm", got, valid)
+		}
 	}
 	// Role boundaries: auditor is read-only; operator cannot mutate owner-only node policy.
 	for _, role := range []string{"auditor", "operator"} {

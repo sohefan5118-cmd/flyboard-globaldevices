@@ -59,7 +59,13 @@ func New(c config.Config, s *store.Store, l *slog.Logger) http.Handler {
 	}
 	rv := redis.NewClient(opt)
 	dv := devices.Valkey{R: rv}
-	ds := devices.Service{Store: dv, Window: 120 * time.Second, MissingThreshold: 2}
+	deviceWindow := c.DeviceWindow
+	if deviceWindow < time.Minute {
+		deviceWindow = 2 * time.Minute
+	}
+	ds := devices.Service{Store: dv, Window: deviceWindow, WindowSource: func(ctx context.Context) time.Duration {
+		return devices.ConfiguredWindow(ctx, s.DB, deviceWindow)
+	}}
 	x := &Server{C: c, S: s, Log: l, Box: b, Limit: ratelimit.Limiter{R: rv, Prefix: "flyboard:rate:"}}
 	x.Owners = ownerlock.Service{Store: ownerlock.Postgres{DB: s.DB}, Window: 120 * time.Second, MigrationGrace: 120 * time.Second, Release: func(ctx context.Context, u int64, o ownerlock.Owner) error { return dv.Remove(ctx, u, "", o.IP) }}
 	x.Control = control.New(s.DB, ds)
@@ -401,6 +407,13 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if decode(r, &q) != nil || q.Key == "" {
 		jsonOut(w, 422, map[string]any{"error": "invalid input"})
 		return
+	}
+	if q.Key == "device_window_minutes" {
+		minutes, ok := q.Value.(float64)
+		if !ok || minutes != float64(int(minutes)) || minutes < 1 || minutes > 5 {
+			jsonOut(w, 422, map[string]any{"error": "device window must be an integer from 1 to 5 minutes"})
+			return
+		}
 	}
 	_, e := s.S.DB.ExecContext(r.Context(), `insert into settings(key,value) values($1,$2) on conflict(key) do update set value=excluded.value,version=settings.version+1,updated_at=now()`, q.Key, mustJSON(q.Value))
 	if e != nil {

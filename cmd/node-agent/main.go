@@ -16,6 +16,9 @@ type request struct{ User, IP string }
 
 func main() {
 	grace, _ := time.ParseDuration(env("AGENT_GRACE", "2m"))
+	if grace < time.Minute || grace > 5*time.Minute {
+		grace = 2 * time.Minute
+	}
 	state, e := nodeagent.OpenDurable(env("AGENT_STATE", "/var/lib/flyboard-agent/state.json"), grace)
 	if e != nil {
 		log.Fatal(e)

@@ -33,6 +33,7 @@ services:
       NODE_RATE_LIMIT: ${NODE_RATE_LIMIT:-300}
       ADMIN_RATE_LIMIT: ${ADMIN_RATE_LIMIT:-600}
       RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1m}
+      DEVICE_WINDOW: ${DEVICE_WINDOW:-2m}
     secrets: [database_url, admin_path, master_key, valkey_url]
     ports: ["${FLYBOARD_BIND:-0.0.0.0}:${FLYBOARD_PORT:-7001}:8080"]
     depends_on: {postgres: {condition: service_healthy}, valkey: {condition: service_healthy}}
@@ -44,7 +45,9 @@ services:
     depends_on: {postgres: {condition: service_healthy}, valkey: {condition: service_healthy}}
   scheduler:
     build: {context: ., args: {TARGET: scheduler}}
-    environment: *env
+    environment:
+      <<: *env
+      DEVICE_WINDOW: ${DEVICE_WINDOW:-2m}
     secrets: [database_url, admin_path, master_key, valkey_url]
     depends_on: {postgres: {condition: service_healthy}, valkey: {condition: service_healthy}}
   node-agent:

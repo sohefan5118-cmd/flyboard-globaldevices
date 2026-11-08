@@ -3,6 +3,8 @@ package devices
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,10 +19,11 @@ var ErrLimit = errors.New("device limit exceeded")
 
 type Clock func() time.Time
 type Device struct {
-	Field  string    `json:"field"`
-	NodeID string    `json:"node_id"`
-	IP     string    `json:"ip"`
-	SeenAt time.Time `json:"seen_at"`
+	Field      string    `json:"field"`
+	NodeID     string    `json:"node_id"`
+	IP         string    `json:"ip"`
+	SeenAt     time.Time `json:"seen_at"`
+	LeaseUntil time.Time `json:"lease_until"`
 }
 type Snapshot struct {
 	UserID      int64    `json:"user_id"`
@@ -38,56 +41,67 @@ type Report struct {
 type Store interface {
 	Admit(context.Context, int64, int, time.Duration, string, string, time.Time) (bool, error)
 	Snapshot(context.Context, int64, time.Duration, time.Time) (Snapshot, error)
-	Missing(context.Context, int64, string, []string, int) ([]string, error)
 	Clear(context.Context, int64) error
 	Prune(context.Context, time.Duration, time.Time) ([]int64, error)
 }
 type Service struct {
-	Store            Store
-	Window           time.Duration
-	MissingThreshold int
-	Pending          func(context.Context, int64) error
-	Now              Clock
+	Store        Store
+	Window       time.Duration
+	WindowSource func(context.Context) time.Duration
+	Pending      func(context.Context, int64) error
+	Now          Clock
 }
 
-func (s Service) window() time.Duration {
-	if s.Window < time.Minute {
+func ClampWindow(window time.Duration) time.Duration {
+	if window < time.Minute {
 		return time.Minute
 	}
-	return s.Window
+	if window > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return window
+}
+
+func ConfiguredWindow(ctx context.Context, db *sql.DB, fallback time.Duration) time.Duration {
+	var raw []byte
+	if err := db.QueryRowContext(ctx, `select value from settings where key='device_window_minutes'`).Scan(&raw); err != nil {
+		return ClampWindow(fallback)
+	}
+	var minutes int
+	if err := json.Unmarshal(raw, &minutes); err != nil || minutes < 1 || minutes > 5 {
+		return ClampWindow(fallback)
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (s Service) WindowFor(ctx context.Context) time.Duration {
+	if s.WindowSource != nil {
+		return ClampWindow(s.WindowSource(ctx))
+	}
+	return ClampWindow(s.Window)
 }
 func (s Service) Report(ctx context.Context, r Report) (Snapshot, error) {
 	now := time.Now()
 	if s.Now != nil {
 		now = s.Now()
 	}
+	window := s.WindowFor(ctx)
 	if r.Kind == "traffic" {
-		return s.Store.Snapshot(ctx, r.UserID, s.window(), now)
+		return s.Store.Snapshot(ctx, r.UserID, window, now)
 	}
-	accepted := []string{}
 	for _, ip := range r.IPs {
 		if net.ParseIP(ip) == nil {
 			continue
 		}
-		ok, e := s.Store.Admit(ctx, r.UserID, r.Limit, s.window(), r.NodeID, ip, now)
+		ok, e := s.Store.Admit(ctx, r.UserID, r.Limit, window, r.NodeID, ip, now)
 		if e != nil {
 			return Snapshot{}, e
 		}
 		if !ok {
-			return s.Store.Snapshot(ctx, r.UserID, s.window(), now)
-		}
-		accepted = append(accepted, ip)
-	}
-	if r.Full {
-		threshold := s.MissingThreshold
-		if threshold < 2 {
-			threshold = 2
-		}
-		if _, e := s.Store.Missing(ctx, r.UserID, r.NodeID, accepted, threshold); e != nil {
-			return Snapshot{}, e
+			return s.Store.Snapshot(ctx, r.UserID, window, now)
 		}
 	}
-	out, e := s.Store.Snapshot(ctx, r.UserID, s.window(), now)
+	out, e := s.Store.Snapshot(ctx, r.UserID, window, now)
 	if e == nil && s.Pending != nil {
 		_ = s.Pending(ctx, r.UserID)
 	}
@@ -114,44 +128,20 @@ func (v Valkey) Admit(c context.Context, u int64, l int, w time.Duration, n, ip 
 	return x == 1, e
 }
 func (v Valkey) Snapshot(c context.Context, u int64, w time.Duration, now time.Time) (Snapshot, error) {
-	_ = v.R.ZRemRangeByScore(c, key(u), "-inf", fmt.Sprint(now.Add(-w).UnixMilli())).Err()
 	z, e := v.R.ZRangeWithScores(c, key(u), 0, -1).Result()
 	out := Snapshot{UserID: u}
 	for _, x := range z {
+		seen := time.UnixMilli(int64(x.Score))
+		if seen.Before(now.Add(-w)) {
+			continue
+		}
 		p := strings.SplitN(x.Member.(string), "|", 2)
 		if len(p) == 2 {
-			out.Devices = append(out.Devices, Device{Field: x.Member.(string), NodeID: p[0], IP: p[1], SeenAt: time.UnixMilli(int64(x.Score))})
+			out.Devices = append(out.Devices, Device{Field: x.Member.(string), NodeID: p[0], IP: p[1], SeenAt: seen, LeaseUntil: seen.Add(w)})
 		}
 	}
 	out.OnlineCount = len(out.Devices)
 	return out, e
-}
-func (v Valkey) Missing(c context.Context, u int64, n string, present []string, t int) ([]string, error) {
-	keep := map[string]bool{}
-	for _, ip := range present {
-		keep[field(n, ip)] = true
-		_ = v.R.HDel(c, "flyboard:missing:"+n, field(n, ip)).Err()
-	}
-	fs, e := v.R.ZRange(c, key(u), 0, -1).Result()
-	if e != nil {
-		return nil, e
-	}
-	removed := []string{}
-	for _, f := range fs {
-		if !strings.HasPrefix(f, n+"|") || keep[f] {
-			continue
-		}
-		count, e := v.R.HIncrBy(c, "flyboard:missing:"+n, f, 1).Result()
-		if e != nil {
-			return nil, e
-		}
-		if count >= int64(t) {
-			_ = v.R.ZRem(c, key(u), f).Err()
-			_ = v.R.HDel(c, "flyboard:missing:"+n, f).Err()
-			removed = append(removed, f)
-		}
-	}
-	return removed, nil
 }
 func (v Valkey) Remove(c context.Context, u int64, node, ip string) error {
 	if ip == "" {

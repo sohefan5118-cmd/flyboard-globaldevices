@@ -88,7 +88,11 @@ func (d *Durable) ApplySnapshot(s devices.Snapshot, revision int64, lease time.D
 		}
 	}
 	for _, x := range s.Devices {
-		d.state.Verified[prefix+x.IP] = now.Add(lease)
+		until := x.LeaseUntil
+		if until.IsZero() {
+			until = now.Add(lease)
+		}
+		d.state.Verified[prefix+x.IP] = until
 	}
 	if revision > 0 {
 		d.state.Revisions[key] = revision

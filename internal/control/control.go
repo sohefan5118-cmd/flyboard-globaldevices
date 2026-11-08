@@ -70,7 +70,7 @@ func (h *Hub) authenticate(r *http.Request, body []byte) (int64, error) {
 	return id, nil
 }
 func (h *Hub) Snapshot(ctx context.Context, user int64) (devices.Snapshot, error) {
-	return h.Devices.Store.Snapshot(ctx, user, h.Devices.Window, time.Now())
+	return h.Devices.Store.Snapshot(ctx, user, h.Devices.WindowFor(ctx), time.Now())
 }
 func (h *Hub) DevicesHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, e := h.authenticate(r, nil); e != nil {
