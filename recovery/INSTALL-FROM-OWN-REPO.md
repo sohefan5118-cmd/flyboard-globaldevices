@@ -245,7 +245,7 @@ sudo install -m 0644 \
   /tmp/MachineController.php \
   overrides/flyboard-restored/MachineController.php
 
-docker compose up -d xboard
+docker compose restart xboard
 ```
 
 ### 验证
