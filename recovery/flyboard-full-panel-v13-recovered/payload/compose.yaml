@@ -28,6 +28,7 @@ services:
       - ./overrides/flyboard-restored/Middleware/XBoardPanelWhitelist.php:/www/app/Http/Middleware/XBoardPanelWhitelist.php:ro
       - ./overrides/flyboard-restored/FlyboardController.php:/www/app/Http/Controllers/V2/Admin/FlyboardController.php:ro
       - ./overrides/flyboard-restored/UserController.php:/www/app/Http/Controllers/V2/Admin/UserController.php:ro
+      - ./overrides/flyboard-restored/MachineController.php:/www/app/Http/Controllers/V2/Admin/Server/MachineController.php:ro
       - ./overrides/NodeWorker.php:/www/app/WebSocket/NodeWorker.php:ro
       - ./overrides/flyboard-restored/NodeEventHandlers.php:/www/app/WebSocket/NodeEventHandlers.php:ro
       - ./overrides/flyboard-restored/FlyboardService.php:/www/app/Services/FlyboardService.php:ro
