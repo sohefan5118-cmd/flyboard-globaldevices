@@ -16,7 +16,27 @@
 
 ---
 
-## 2. 校验安装包（只读检查）
+## 2. 公共仓库一键安装
+
+一键入口位于公共仓库 `sohefan5118-cmd/flyboard-globaldevices`，兼容原来的变量名。下面命令会下载并校验 RC2、解压到指定目录，然后调用正式安装器：
+
+```bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/cleanroom-go-rc2/install-one-click.sh' \
+  -o /tmp/flyboard-install-one-click.sh
+
+env \
+  INSTALL_DIR='/opt/flyboard-57249' \
+  PANEL_PORT='57249' \
+  PROJECT_NAME='flyboard_57249' \
+  ADMIN_EMAIL='admin@example.com' \
+  PUBLIC_URL='http://103.200.216.155:57249' \
+  bash /tmp/flyboard-install-one-click.sh
+```
+
+`PUBLIC_URL` 需要包含 `http://` 或 `https://`；若直接调用下层 `install.sh`，`FLYBOARD_PUBLIC_HOST` 才只填写 IP 或域名。
+
+## 3. 校验安装包（只读检查）
 
 把以下两个文件上传到新服务器同一目录：
 
@@ -44,7 +64,7 @@ tar -tzf flyboard-rc2.tar.gz | head -50
 
 ---
 
-## 3. 安装 Docker（真正执行，会修改系统）
+## 4. 安装 Docker（真正执行，会修改系统）
 
 如果服务器已经安装 Docker Engine 和 Compose v2，跳到第 4 节。
 
@@ -97,13 +117,13 @@ sudo usermod -aG docker "$USER"
 
 ---
 
-## 4. 解压 Flyboard（真正执行，会创建文件）
+## 5. 解压 Flyboard（真正执行，会创建文件）
 
 建议固定安装到 `/opt/flyboard`：
 
 ```bash
 sudo mkdir -p /opt/flyboard
-sudo tar -xzf /root/flyboard-rc2.tar.gz -C /opt/flyboard
+sudo tar -xzf /root/flyboard-rc2.tar.gz -C /opt/flyboard --strip-components=1
 cd /opt/flyboard
 sudo chown -R root:root /opt/flyboard
 sudo chmod 755 /opt/flyboard
@@ -119,7 +139,7 @@ ls -la install.sh compose.yaml Dockerfile
 
 ---
 
-## 5. 安装前检查（只读检查）
+## 6. 安装前检查（只读检查）
 
 检查 CPU、内存、磁盘与端口：
 
@@ -148,7 +168,7 @@ echo "Compose 配置检查通过"
 
 ---
 
-## 6. 一键安装 Flyboard（真正执行，会创建容器、卷和密钥）
+## 7. 安装 Flyboard（真正执行，会创建容器、卷和密钥）
 
 ### 默认端口 7001
 
@@ -205,7 +225,7 @@ sudo env \
 
 ---
 
-## 7. 安装后验证（只读验证）
+## 8. 安装后验证（只读验证）
 
 ### 查看容器
 

@@ -14,9 +14,10 @@ Independent Go implementation based only on the observable contract in `research
 ## One-command install
 
 ```sh
-git clone --depth 1 https://github.com/sohefan5118-cmd/Flyboard.git && \
-cd Flyboard && \
-FLYBOARD_ADMIN_EMAIL='admin@example.com' bash install.sh
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/cleanroom-go-rc2/install-one-click.sh' \
+  -o /tmp/flyboard-install-one-click.sh
+FLYBOARD_ADMIN_EMAIL='admin@example.com' bash /tmp/flyboard-install-one-click.sh
 ```
 
 After installation, visit the randomized admin URL printed by the installer:
