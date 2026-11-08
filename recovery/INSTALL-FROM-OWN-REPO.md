@@ -75,28 +75,28 @@ mkdir -p ~/flyboard-install
 cd ~/flyboard-install
 
 curl -fL \
-  -o flyboard-full-panel-v13-recovered.tar.gz \
-  'https://github.com/sohefan5118-cmd/flyboard-globaldevices/releases/download/flyboard-recovery-v13-offline-20261104/flyboard-full-panel-v13-recovered.tar.gz'
+  -o flyboard-full-panel-v13-node-install-fixed.tar.gz \
+  'https://github.com/sohefan5118-cmd/flyboard-globaldevices/releases/download/flyboard-recovery-v13-offline-20261104/flyboard-full-panel-v13-node-install-fixed.tar.gz'
 
 curl -fL \
-  -o flyboard-full-panel-v13-recovered.tar.gz.sha256 \
-  'https://github.com/sohefan5118-cmd/flyboard-globaldevices/releases/download/flyboard-recovery-v13-offline-20261104/flyboard-full-panel-v13-recovered.tar.gz.sha256'
+  -o flyboard-full-panel-v13-node-install-fixed.tar.gz.sha256 \
+  'https://github.com/sohefan5118-cmd/flyboard-globaldevices/releases/download/flyboard-recovery-v13-offline-20261104/flyboard-full-panel-v13-node-install-fixed.tar.gz.sha256'
 
-sha256sum -c flyboard-full-panel-v13-recovered.tar.gz.sha256
-tar -xzf flyboard-full-panel-v13-recovered.tar.gz
+sha256sum -c flyboard-full-panel-v13-node-install-fixed.tar.gz.sha256
+tar -xzf flyboard-full-panel-v13-node-install-fixed.tar.gz
 cd flyboard-full-panel-v13-recovered
 ```
 
 预期校验结果：
 
 ```text
-flyboard-full-panel-v13-recovered.tar.gz: OK
+flyboard-full-panel-v13-node-install-fixed.tar.gz: OK
 ```
 
 安装包 SHA-256：
 
 ```text
-d25026db90c20799e61ed0222f7a4eb3a4b8bb5a35ed62e81a4c658ddb819df4
+c3536d63032e2bee5560e9fcfcf3833fb992ea7c3be4c22dfef280e29fcbe4bc
 ```
 
 ## 三、安装前验证
