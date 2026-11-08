@@ -206,8 +206,8 @@ sudo test -f /etc/xboard-node/config.yml && echo "配置文件存在"
 
 ```bash
 curl -fsSL \
-  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh' \
-  | sudo bash
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/scripts/install-xboard-node-globaldevices2.sh' \
+  | sudo env BRANCH='flyboard-recovery-v13-offline-20261104' bash
 ```
 
 机器 Token 属于凭据，不要发到聊天或提交到仓库。Token 暴露后必须先在后台重置，再使用新命令。

@@ -20,7 +20,9 @@ docker exec flyboard-xboard-1 sh -lc 'cd /www && php artisan route:list --path=a
 Recommended installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/scripts/install-xboard-node-globaldevices2.sh' \
+  | sudo env BRANCH='flyboard-recovery-v13-offline-20261104' bash
 ```
 
 ## Redis keys

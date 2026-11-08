@@ -49,7 +49,9 @@ xboard-node.service
 然后在新节点服务器上执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh | bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/flyboard-recovery-v13-offline-20261104/scripts/install-xboard-node-globaldevices2.sh' \
+  | sudo env BRANCH='flyboard-recovery-v13-offline-20261104' bash
 ```
 
 如果你的仓库名不同：
@@ -84,6 +86,8 @@ curl -fsSL https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevi
 ```text
 recovery/INSTALL-FROM-OWN-REPO.md
 ```
+
+该教程同时包含已安装面板的就地修复步骤，适用于 `/opt/flyboard-57249`，不会删除面板数据或要求重装。
 
 全新 Ubuntu/Debian x86_64 服务器可以使用自有仓库中的一键入口：
 
