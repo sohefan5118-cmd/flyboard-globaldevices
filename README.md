@@ -32,7 +32,13 @@ a97102e93ed3a7c6cf0fe136c28acc64c448bbd93a0b7e166fa74928641c2d3d  xboard-node-gl
 
 ## 新节点安装方式
 
-先按 XBoard/Flyboard 正常流程添加节点、安装并配置 xboard-node，确认有：
+先在 Flyboard 后台添加机器并重置机器 Token，然后复制后台生成的安装命令。后台命令固定使用自有仓库中已验证的节点安装器提交：
+
+```text
+sohefan5118-cmd/xboard-node@09cf31b62d667bbfc55124f5d691a571c090f8c7
+```
+
+该命令会真正安装并启动标准 xboard-node。安装完成后确认有：
 
 ```text
 /etc/xboard-node/config.yml
@@ -58,6 +64,8 @@ curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/YOUR_REPO/main/scripts/in
 xboard-node globaldevices5-device-limit2
 active
 ```
+
+后台生成的标准节点安装命令和本节的全局设备限制补丁是两个连续步骤，不能只执行第二步。不要把机器 Token 发到聊天或写入教程；Token 暴露后必须先在后台重置。
 
 ## 面板端安装方式
 

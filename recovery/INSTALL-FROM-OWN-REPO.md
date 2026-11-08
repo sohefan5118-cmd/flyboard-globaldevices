@@ -184,6 +184,34 @@ sudo docker compose exec -T xboard php /www/artisan schedule:list | grep 'cleanu
 - Horizon 显示 `Horizon is running`。
 - Scheduler 列表包含 `cleanup:online-status`。
 
+## 六、安装节点
+
+面板安装和节点安装是两个独立步骤。先在后台创建机器并重置机器 Token，再复制后台生成的命令到节点服务器执行。后台命令固定引用：
+
+```text
+https://raw.githubusercontent.com/sohefan5118-cmd/xboard-node/09cf31b62d667bbfc55124f5d691a571c090f8c7/install.sh
+```
+
+该提交已验证支持 `curl | bash`，不会再触发 `BASH_SOURCE[0]: unbound variable`。
+
+节点安装后的只读验证：
+
+```bash
+sudo systemctl is-active xboard-node.service
+sudo /usr/local/bin/xboard-node -v
+sudo test -f /etc/xboard-node/config.yml && echo "配置文件存在"
+```
+
+如果需要本仓库的全局设备限制，再执行第二步补丁安装：
+
+```bash
+curl -fsSL \
+  'https://raw.githubusercontent.com/sohefan5118-cmd/flyboard-globaldevices/main/scripts/install-xboard-node-globaldevices2.sh' \
+  | sudo bash
+```
+
+机器 Token 属于凭据，不要发到聊天或提交到仓库。Token 暴露后必须先在后台重置，再使用新命令。
+
 管理员地址和初始随机密码位置：
 
 ```bash
@@ -193,7 +221,7 @@ sudo cat /opt/flyboard/install-result.txt
 
 首次登录后立即修改管理员密码。
 
-## 六、完全离线安装
+## 七、完全离线安装
 
 如果 GHCR 无法访问，可以从同一个自有 Release 下载离线镜像：
 
@@ -223,7 +251,7 @@ sudo docker image inspect 'ghcr.io/sohefan5118-cmd/xboard:896e4926' \
 
 载入镜像后，再按第四节运行安装器。安装器会检测本机已有固定镜像并跳过远程拉取。
 
-## 七、已完成的实装测试
+## 八、已完成的实装测试
 
 2026-11-04 使用 Release 中实际下载的安装包完成了隔离新装测试：
 

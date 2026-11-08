@@ -172,6 +172,7 @@ while read -r sum rel; do
     overrides/ServerService.php) target=/www/app/Services/ServerService.php ;;
     overrides/NodeWorker.php) target=/www/app/WebSocket/NodeWorker.php ;;
     overrides/console-commands/CleanupOnlineStatus.php) target=/www/app/Console/Commands/CleanupOnlineStatus.php ;;
+    overrides/flyboard-restored/MachineController.php) target=/www/app/Http/Controllers/V2/Admin/Server/MachineController.php ;;
     overrides/flyboard-restored/admin.blade.php) target=/www/resources/views/admin.blade.php ;;
     overrides/flyboard-restored/flyboard.blade.php) target=/www/resources/views/flyboard.blade.php ;;
     overrides/flyboard-restored/web.php) target=/www/routes/web.php ;;

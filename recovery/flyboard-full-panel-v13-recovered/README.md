@@ -1,6 +1,6 @@
 # FlyBoard A 基线完整新装包 v1
 
-这是 A 当前实际运行 FlyBoard/XBoard 面板功能的**干净新服务器安装包**：固定基础镜像 digest，包含 26 个实际生效覆盖文件、v13 全局设备限制、严格 Subscription Owner Lock、FlyBoard 后台/上游/客户端/白名单/日志、Horizon、WebSocket、Laravel Scheduler 和所有 FlyBoard schema。
+这是 A 当前实际运行 FlyBoard/XBoard 面板功能的**干净新服务器安装包**：固定基础镜像 digest，包含完整面板覆盖文件、v13 全局设备限制、严格 Subscription Owner Lock、FlyBoard 后台/上游/客户端/白名单/日志、Horizon、WebSocket、Laravel Scheduler 和所有 FlyBoard schema。
 
 不包含 A 的 `.env`、APP_KEY、管理员密码、SQLite、Redis、用户、节点、订阅 URL、白名单 IP、日志或节点凭据。新服务器会生成自己的 APP_KEY、管理员随机密码、SQLite 与 Redis 状态。
 
@@ -56,7 +56,7 @@ docker compose restart
 - 自有公开镜像：`ghcr.io/sohefan5118-cmd/xboard:896e4926`
 - 安装器强制校验已登记的镜像内容 ID 或自有 GHCR manifest digest；兼容传统 Docker 镜像存储和 Docker 29/containerd 镜像存储。
 
-外部 `xboard-node` 是独立组件，不在此面板包中；节点配置、ID、密钥必须在新节点上独立配置。
+外部 `xboard-node` 是独立组件，不在此面板包中。后台机器安装命令固定引用自有仓库提交 `09cf31b62d667bbfc55124f5d691a571c090f8c7`；该提交已验证支持 `curl | bash`。节点安装后，如需全局设备限制，再运行 `flyboard-globaldevices` 的节点补丁脚本。机器 Token 暴露后必须先在后台重置。
 
 ## 恢复审计合成说明（2026-10-27）
 
