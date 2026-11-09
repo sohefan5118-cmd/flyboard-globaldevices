@@ -12,6 +12,7 @@ BRANCH="${BRANCH:-main}"
 SERVICE="${SERVICE:-xboard-node.service}"
 BIN="${BIN:-/usr/local/bin/xboard-node}"
 CONFIG="${CONFIG:-/etc/xboard-node/config.yml}"
+CREDENTIALS="${CREDENTIALS:-/etc/xboard-node/credentials.env}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-30bb575783e802f185aaa40759ead30e16d7b695e989686cb9270b2be12c260b}"
 VERSION_EXPECT="xboard-node globaldevices5-device-limit2"
 TMP_DIR="$(mktemp -d)"
@@ -58,14 +59,36 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-PANEL_URL="$(sed -n 's/^[[:space:]]*url:[[:space:]]*//p' "$CONFIG" | head -n1)"
-MACHINE_ID="$(sed -n 's/^[[:space:]]*machine_id:[[:space:]]*//p' "$CONFIG" | head -n1 | tr -d '"')"
-TOKEN="$(sed -n 's/^[[:space:]]*token:[[:space:]]*//p' "$CONFIG" | head -n1 | tr -d '"')"
-if [ -z "$PANEL_URL" ] || [ -z "$MACHINE_ID" ] || [ -z "$TOKEN" ]; then
-  echo "ERROR: unable to parse panel url / machine_id / token from $CONFIG" >&2
+# Current xboard-node configs use nested instances and keep credentials in a
+# separate env file. Machine mode uses machine_id; node mode uses node_id.
+# Read scalar values as data and never eval config-file text.
+IFS='|' read -r PANEL_URL INSTANCE_ID TOKEN TOKEN_ENV < <(awk '
+function value(line) {
+  sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
+  sub(/[[:space:]]+#.*/, "", line)
+  gsub(/^"|"$/, "", line)
+  gsub(/^\047|\047$/, "", line)
+  return line
+}
+/^[[:space:]]*url:[[:space:]]*/ && panel == "" { panel=value($0) }
+/^[[:space:]]*machine_id:[[:space:]]*/ && machine == "" { machine=value($0) }
+/^[[:space:]]*node_id:[[:space:]]*/ && node == "" { node=value($0) }
+/^[[:space:]]*token_env:[[:space:]]*/ && token_env == "" { token_env=value($0) }
+/^[[:space:]]*token:[[:space:]]*/ && token == "" { token=value($0) }
+END {
+  id = machine != "" ? machine : node
+  printf "%s|%s|%s|%s\n", panel, id, token, token_env
+}
+' "$CONFIG")
+if [ -z "$TOKEN" ] && [ -n "$TOKEN_ENV" ] && [ -r "$CREDENTIALS" ]; then
+  TOKEN="$(awk -F= -v key="$TOKEN_ENV" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$CREDENTIALS")"
+fi
+if [ -z "$PANEL_URL" ] || [ -z "$INSTANCE_ID" ] || [ -z "$TOKEN" ]; then
+  echo "ERROR: unable to parse panel URL / machine or node ID / token from $CONFIG and $CREDENTIALS" >&2
   exit 1
 fi
-DEVICE_URL="${PANEL_URL%/}/api/v2/server/devices?machine_id=${MACHINE_ID}&node_id=${MACHINE_ID}&token=${TOKEN}"
+DEVICE_URL="${PANEL_URL%/}/api/v2/server/devices?machine_id=${INSTANCE_ID}&node_id=${INSTANCE_ID}&token=${TOKEN}"
+DEVICE_URL_REDACTED="${PANEL_URL%/}/api/v2/server/devices?machine_id=${INSTANCE_ID}&node_id=${INSTANCE_ID}&token=REDACTED"
 if [ "$DL_TOOL" = "curl" ]; then
   DL=(curl -fL --retry 3 --connect-timeout 15 -o "$TMP_GZ" "$URL")
   FETCH_JSON=(curl -fsS --max-time 15 -o "$TMP_DIR/preflight-devices.json" "$DEVICE_URL")
@@ -76,7 +99,7 @@ fi
 
 echo "== Preflight panel devices route =="
 if ! "${FETCH_JSON[@]}"; then
-  echo "ERROR: cannot reach $DEVICE_URL" >&2
+  echo "ERROR: cannot reach $DEVICE_URL_REDACTED" >&2
   echo "ERROR: this usually means the running panel is missing /api/v2/server/devices or the token is invalid." >&2
   exit 1
 fi
