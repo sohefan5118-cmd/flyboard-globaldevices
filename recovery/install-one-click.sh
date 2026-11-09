@@ -86,8 +86,16 @@ say "解压并验证安装包内部清单"
 tar -xzf "$ARCHIVE" -C "$WORK_DIR"
 PACKAGE_DIR="$WORK_DIR/flyboard-full-panel-v13-recovered"
 [[ -x "$PACKAGE_DIR/install.sh" || -f "$PACKAGE_DIR/install.sh" ]] || die "安装包缺少 install.sh。"
+[[ -f "$PACKAGE_DIR/payload/compose.yaml" ]] || die "安装包缺少 payload/compose.yaml。"
+[[ -f "$PACKAGE_DIR/payload/compose.bootstrap.yaml" ]] || die "安装包缺少 payload/compose.bootstrap.yaml。"
+[[ -f "$PACKAGE_DIR/payload/overrides/flyboard-restored/MachineController.php" ]] || die "安装包缺少 MachineController.php。"
 (cd "$PACKAGE_DIR" && bash -n install.sh && sha256sum -c CANDIDATE-SHA256SUMS >/dev/null)
 (cd "$PACKAGE_DIR/payload" && sha256sum -c ../PAYLOAD-SHA256SUMS >/dev/null)
+grep -Fq './overrides/flyboard-restored/MachineController.php:/www/app/Http/Controllers/V2/Admin/Server/MachineController.php:ro' \
+  "$PACKAGE_DIR/payload/compose.yaml" || die "compose.yaml 未挂载 MachineController.php。"
+if grep -Fq '.env.install' "$PACKAGE_DIR/install.sh"; then
+  die "安装器仍依赖可能未打包的 .env.install。"
+fi
 
 if grep -RInE 'cedar2025|ghcr\.io/cedar2025|github\.com/cedar2025/[Xx]board' \
   "$PACKAGE_DIR" --exclude='CANDIDATE-SHA256SUMS'; then

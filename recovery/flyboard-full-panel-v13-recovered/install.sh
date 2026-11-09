@@ -61,7 +61,7 @@ fi
 
 say "复制经校验的 A 基线代码（不含 A 的数据库、Redis、密钥和业务数据）"
 cp -a "$PACKAGE_DIR/payload/." "$INSTALL_DIR/"
-mv "$INSTALL_DIR/.env.install" "$INSTALL_DIR/.env"
+: > "$INSTALL_DIR/.env"
 mkdir -p "$INSTALL_DIR/.docker/.data" "$INSTALL_DIR/storage/logs" "$INSTALL_DIR/storage/theme" "$INSTALL_DIR/plugins"
 touch "$INSTALL_DIR/.docker/.data/database.sqlite"
 chmod 600 "$INSTALL_DIR/.env" "$INSTALL_DIR/.docker/.data/database.sqlite"
@@ -162,7 +162,7 @@ running_services="$(docker compose --project-name "$PROJECT_NAME" ps --status ru
 # Verify protected A baseline and all active package files inside the live container.
 while read -r sum rel; do
   case "$rel" in
-    compose.yaml|compose.bootstrap.yaml|.env.install|database/migrations/*) continue ;;
+    compose.yaml|compose.bootstrap.yaml|database/migrations/*) continue ;;
   esac
   target=''
   case "$rel" in
