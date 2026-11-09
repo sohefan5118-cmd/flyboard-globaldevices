@@ -96,7 +96,7 @@ flyboard-full-panel-v13-node-install-fixed.tar.gz: OK
 安装包 SHA-256：
 
 ```text
-cdc96cbbfd4ec437df3f22555849b37c3796550122ed4741ac5c80da554cc3aa
+72c5a7f8d7af226a44342409be8d9cf0b5072674ac737d53bf6804a2b2604a14
 ```
 
 ## 三、安装前验证
