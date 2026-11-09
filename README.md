@@ -20,14 +20,14 @@
 ## 当前发布版本
 
 ```text
-xboard-node globaldevices5-device-limit2 (built 2026-08-22T09:15:30Z)
+xboard-node globaldevices5-device-limit3 (built 2026-11-09T04:03:31Z)
 ```
 
 SHA256：
 
 ```text
-30bb575783e802f185aaa40759ead30e16d7b695e989686cb9270b2be12c260b  xboard-node-global-device-linux-amd64
-a97102e93ed3a7c6cf0fe136c28acc64c448bbd93a0b7e166fa74928641c2d3d  xboard-node-global-device-linux-amd64.gz
+caea341da5ebfe9b3c5d51519dcdc822f22a97b1c94795dc3d9c14311c9341e2  xboard-node-global-device-linux-amd64
+855bfc04871d2f0d30fab06523241e13b778aa579195cdc4a4b1fe70586d2a84  xboard-node-global-device-linux-amd64.gz
 ```
 
 ## 新节点安装方式
@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/YOUR_REPO/main/scripts/in
 成功后应看到：
 
 ```text
-xboard-node globaldevices5-device-limit2
+xboard-node globaldevices5-device-limit3
 active
 ```
 

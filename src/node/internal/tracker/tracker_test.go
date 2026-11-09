@@ -184,6 +184,28 @@ func TestFlushAliveIPs_DedupSameIP(t *testing.T) {
 	}
 }
 
+func TestCurrentAliveIPs_RepeatsStableAndEmptySnapshots(t *testing.T) {
+	tr := New()
+	tr.Process(nil, map[int]map[string]bool{
+		1: {"2.2.2.2": true, "1.1.1.1": true},
+	}, 2)
+
+	first := tr.CurrentAliveIPs()
+	second := tr.CurrentAliveIPs()
+	if got := first[1]; len(got) != 2 || got[0] != "1.1.1.1" || got[1] != "2.2.2.2" {
+		t.Fatalf("first stable snapshot = %v", got)
+	}
+	if got := second[1]; len(got) != 2 || got[0] != "1.1.1.1" || got[1] != "2.2.2.2" {
+		t.Fatalf("second stable snapshot = %v", got)
+	}
+
+	tr.Process(nil, map[int]map[string]bool{}, 0)
+	empty := tr.CurrentAliveIPs()
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("empty snapshot = %#v, want non-nil empty map", empty)
+	}
+}
+
 func TestHasTraffic(t *testing.T) {
 	tr := New()
 	if tr.HasTraffic() {

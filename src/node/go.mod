@@ -1,6 +1,6 @@
 module github.com/cedar2025/xboard-node
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/caddyserver/certmagic v0.25.2

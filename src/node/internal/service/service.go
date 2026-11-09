@@ -1270,12 +1270,10 @@ func (s *Service) sendDeviceBatch() {
 		return
 	}
 
-	devices := s.tracker.FlushAliveIPs()
-	// FlushAliveIPs returns nil if no changes since last flush
-	if devices == nil {
-		nlog.Core().Debug("device snapshot unchanged, skipping")
-		return
-	}
+	// Send a complete heartbeat even when the snapshot is unchanged. The panel
+	// leases device claims, so change-only reports let a stable online client
+	// expire after flyboard_antishare_window.
+	devices := s.tracker.CurrentAliveIPs()
 	s.sink.ReportDevices(s.wsClient, devices)
 	nlog.Core().Debug("device snapshot sent", "users", len(devices))
 }

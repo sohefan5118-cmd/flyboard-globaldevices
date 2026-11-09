@@ -198,6 +198,22 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 	return t.aliveIPsBuf
 }
 
+// CurrentAliveIPs returns a fresh copy of the current device snapshot.
+// Unlike FlushAliveIPs, it never suppresses an unchanged snapshot. Periodic
+// device heartbeats use this so the panel can renew leases for stable clients.
+func (t *Tracker) CurrentAliveIPs() map[int][]string {
+	s := t.live.Load()
+	result := make(map[int][]string, len(s.aliveIPs))
+	for uid, ips := range s.aliveIPs {
+		result[uid] = make([]string, 0, len(ips))
+		for ip := range ips {
+			result[uid] = append(result[uid], ip)
+		}
+		sort.Strings(result[uid])
+	}
+	return result
+}
+
 // calcAliveIPsHash computes a deterministic hash for change detection.
 func calcAliveIPsHash(aliveIPs map[int]map[string]bool) string {
 	if len(aliveIPs) == 0 {
