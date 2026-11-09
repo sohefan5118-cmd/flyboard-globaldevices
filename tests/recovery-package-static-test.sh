@@ -28,4 +28,45 @@ if grep -Fq '.env.install' "$PACKAGE_DIR/install.sh"; then
 fi
 grep -Fq ': > "$INSTALL_DIR/.env"' "$PACKAGE_DIR/install.sh"
 
+# Exercise the failed stage with a fake Docker CLI. The installer must create .env,
+# reach the image pull, then remove the isolated install directory on failure.
+mkdir -p "$TMP_DIR/fake-bin"
+cat > "$TMP_DIR/fake-bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == 'compose version' ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == 'ps' ]]; then
+  exit 0
+fi
+if [[ "$*" == image\ inspect* ]]; then
+  exit 1
+fi
+if [[ "${1:-}" == 'pull' ]]; then
+  exit 42
+fi
+exit 0
+EOF
+chmod +x "$TMP_DIR/fake-bin/docker"
+
+SMOKE_DIR="$TMP_DIR/smoke-install"
+set +e
+PATH="$TMP_DIR/fake-bin:$PATH" \
+INSTALL_DIR="$SMOKE_DIR" \
+PANEL_PORT=57247 \
+PROJECT_NAME=flyboard_test \
+ADMIN_EMAIL=admin@example.com \
+PUBLIC_URL=http://127.0.0.1:57247 \
+bash "$PACKAGE_DIR/install.sh" >"$TMP_DIR/smoke.log" 2>&1
+smoke_rc=$?
+set -e
+
+[[ "$smoke_rc" -ne 0 ]]
+grep -Fq '镜像拉取失败' "$TMP_DIR/smoke.log"
+if grep -Fq '.env.install' "$TMP_DIR/smoke.log"; then
+  cat "$TMP_DIR/smoke.log" >&2
+  exit 1
+fi
+[[ ! -e "$SMOKE_DIR" ]]
+
 echo 'recovery package static tests passed'
